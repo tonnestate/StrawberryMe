@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
 import subprocess
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any
 
 from .config import Config, load_config
-from .models import ArchitectureMap, Delta, Edge, Node, RuntimeObservation
+from .models import ArchitectureMap, Delta, Edge, ExecutionEnvelope, Node, ProbeCase, ProbePlan, RuntimeObservation
 from .runtime_probe import observe_python
 from .scanner import scan_python
 from .store import Store
@@ -45,7 +48,7 @@ class StrawberryCore:
                 "effects": len(observation.effects),
             }
         return {
-            "strawberryme": "0.2.0",
+            "strawberryme": "0.3.0",
             "root": str(self.root),
             "source": architecture.source.to_dict(),
             "language_support": {"python": "ACTIVE", "javascript": "PLANNED", "php": "PLANNED", "csharp": "PLANNED"},
@@ -53,9 +56,13 @@ class StrawberryCore:
             "architecture": {"rules": len(architecture.rules), "violations": len(violations)},
             "future_delta": delta.to_dict() if delta else None,
             "runtime": runtime_state,
+            "adaptive": {
+                "latest_probe_plan": (self.store.get_latest_probe_plan().to_dict() if self.store.get_latest_probe_plan() else None),
+                "principle": "start small; follow evidence; expand only unresolved branches",
+            },
         }
 
-    def cursor(self, target: str, horizon: int = 1) -> dict[str, Any]:
+    def cursor(self, target: str, horizon: int = 1, adaptive: bool = False) -> dict[str, Any]:
         architecture = self.map()
         matches = self._find_nodes(architecture, target)
         if not matches:
@@ -63,6 +70,12 @@ class StrawberryCore:
         if len(matches) > 1:
             return {"status": "AMBIGUOUS", "target": target, "candidates": [n.to_dict() for n in matches[:20]]}
         focus = matches[0]
+        requested_horizon = horizon
+        expansion_basis: list[str] = []
+        if adaptive:
+            assessment = self.assess_change(paths=[focus.path], target=target)
+            horizon = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}[assessment["risk"]]
+            expansion_basis = list(assessment["reasons"])
         by_id = {n.id: n for n in architecture.nodes}
         adjacency: dict[str, set[str]] = {}
         reverse: dict[str, set[str]] = {}
@@ -92,6 +105,9 @@ class StrawberryCore:
             "upstream": [by_id[x].to_dict() if x in by_id else {"id": x} for x in upstream],
             "downstream": [by_id[x].to_dict() if x in by_id else {"id": x} for x in downstream],
             "horizon": horizon,
+            "requested_horizon": requested_horizon,
+            "adaptive": adaptive,
+            "expansion_basis": expansion_basis,
             "nodes": [by_id[x].to_dict() for x in sorted(seen) if x in by_id],
             "edges": [e.to_dict() for e in relevant_edges],
             "violations": [v for v in self._boundary_violations(architecture) if v["source_node"] in seen or v["target_node"] in seen],
@@ -135,6 +151,7 @@ class StrawberryCore:
         timeout_seconds: int = 30,
         expected_runtime_edges: list[str] | None = None,
         forbidden_runtime_edges: list[str] | None = None,
+        envelope: ExecutionEnvelope | None = None,
     ) -> dict[str, Any]:
         architecture = self.map()
         expected = tuple(sorted(set(expected_runtime_edges or [])))
@@ -146,13 +163,312 @@ class StrawberryCore:
                 "malformed_edges": malformed,
                 "edge_format": "source|CALL|target, e.g. module:app.service|CALL|module:app.db",
             }
-        observation = observe_python(self.root, architecture.source, command, timeout_seconds)
+        observation = observe_python(self.root, architecture.source, command, timeout_seconds, envelope=envelope)
         self.store.set_runtime_observation(observation)
         self.store.set_json(
             "runtime_contract",
             {"expected_runtime_edges": list(expected), "forbidden_runtime_edges": list(forbidden)},
         )
         return self._runtime_result(architecture, observation, expected, forbidden)
+
+    def assess_change(self, paths: list[str] | None = None, target: str | None = None) -> dict[str, Any]:
+        architecture = self.map()
+        selected = sorted(set(paths or architecture.source.dirty_files))
+        reasons: list[str] = []
+        dynamic_hits: list[dict[str, str]] = []
+        boundaries: set[str] = set()
+        code_paths: list[str] = []
+
+        patterns = {
+            "DYNAMIC_IMPORT": ("importlib", "import_module(", "__import__("),
+            "RUNTIME_DISPATCH": ("getattr(", "setattr(", "entry_points(", "plugins"),
+            "PROCESS": ("subprocess", "os.system("),
+            "NETWORK": ("socket.", "requests.", "httpx.", "aiohttp."),
+            "ENVIRONMENT": ("os.getenv(", "os.environ", "environ["),
+        }
+        for rel in selected:
+            normalized = rel.replace("\\", "/")
+            if not normalized.endswith(".py"):
+                continue
+            code_paths.append(normalized)
+            boundary = self.config.boundary_for(normalized)
+            if boundary:
+                boundaries.add(boundary)
+            path = self.root / normalized
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for code, needles in patterns.items():
+                hit = next((needle for needle in needles if needle in text), None)
+                if hit:
+                    dynamic_hits.append({"path": normalized, "signal": code, "evidence": hit})
+
+        if not selected:
+            reasons.append("NO_CHANGE_SCOPE")
+        if selected and not code_paths:
+            reasons.append("NON_CODE_ONLY")
+        if boundaries:
+            reasons.append("ARCHITECTURE_BOUNDARY_TOUCHED")
+        if dynamic_hits:
+            reasons.append("DYNAMIC_BEHAVIOR_SIGNAL")
+        if architecture.parse_errors:
+            reasons.append("STATIC_MAP_INCOMPLETE")
+        delta = self.store.get_delta()
+        if delta and (delta.add or delta.remove):
+            reasons.append("EXPECTED_DELTA_ACTIVE")
+
+        latest = self.store.get_runtime_observation()
+        if latest and self._observation_current(latest, architecture):
+            static_pairs = self._static_module_pairs(architecture)
+            if any((edge.source, edge.target) not in static_pairs for edge in latest.edges):
+                reasons.append("RUNTIME_ONLY_EDGE_PREVIOUSLY_OBSERVED")
+
+        if any(reason in reasons for reason in ("DYNAMIC_BEHAVIOR_SIGNAL", "STATIC_MAP_INCOMPLETE", "RUNTIME_ONLY_EDGE_PREVIOUSLY_OBSERVED")):
+            risk = "HIGH"
+        elif any(reason in reasons for reason in ("ARCHITECTURE_BOUNDARY_TOUCHED", "EXPECTED_DELTA_ACTIVE")):
+            risk = "MEDIUM"
+        else:
+            risk = "LOW"
+
+        recommended = {"LOW": "STATIC_ONLY", "MEDIUM": "CURSOR_THEN_VERIFY", "HIGH": "MINIMAL_RUNTIME_PROBE"}[risk]
+        return {
+            "status": "OK",
+            "source": architecture.source.to_dict(),
+            "target": target,
+            "paths": selected,
+            "risk": risk,
+            "reasons": sorted(set(reasons)),
+            "dynamic_signals": dynamic_hits,
+            "boundaries": sorted(boundaries),
+            "recommended_path": recommended,
+            "recommended_horizon": {"LOW": 0, "MEDIUM": 1, "HIGH": 2}[risk],
+        }
+
+    def probe_plan(
+        self,
+        command: list[str],
+        target: str | None = None,
+        paths: list[str] | None = None,
+        expected_runtime_edges: list[str] | None = None,
+        forbidden_runtime_edges: list[str] | None = None,
+        filesystem: str = "TEMP_WRITE",
+        network: str = "DENY",
+        process_spawn: str = "DENY",
+        allowed_env_names: list[str] | None = None,
+        max_cases: int = 3,
+        max_repeats: int = 3,
+        max_runtime_seconds: int = 60,
+    ) -> dict[str, Any]:
+        if not command:
+            return {"status": "INVALID", "reason": "command must not be empty"}
+        architecture = self.map()
+        assessment = self.assess_change(paths=paths, target=target)
+        executable = Path(command[0]).name.lower()
+        envelope = ExecutionEnvelope(
+            source_snapshot=architecture.source.snapshot_id or "",
+            allowed_executables=(executable,),
+            filesystem=filesystem,  # type: ignore[arg-type]
+            network=network,  # type: ignore[arg-type]
+            process_spawn=process_spawn,  # type: ignore[arg-type]
+            allowed_env_names=tuple(sorted(set(allowed_env_names or []))),
+            max_cases=max(1, min(int(max_cases), 20)),
+            max_repeats=max(1, min(int(max_repeats), 20)),
+            max_runtime_seconds=max(1, min(int(max_runtime_seconds), 600)),
+        )
+        errors = self._validate_envelope(envelope)
+        if errors:
+            return {"status": "INVALID", "errors": errors, "envelope": envelope.to_dict()}
+
+        expected = tuple(sorted(set(expected_runtime_edges or [])))
+        forbidden = tuple(sorted(set(forbidden_runtime_edges or [])))
+        malformed = [item for item in [*expected, *forbidden] if len(item.split("|")) != 3]
+        if malformed:
+            return {"status": "INVALID", "malformed_edges": malformed}
+
+        risk = assessment["risk"]
+        repeats = 1
+        mode = "SINGLE_SHOT"
+        if risk == "HIGH" and envelope.max_repeats >= 2:
+            repeats = min(2, envelope.max_repeats)
+            mode = "REPEAT_N"
+        case = ProbeCase(
+            case_id="P1",
+            scenario="minimal runtime probe",
+            command=tuple(command),
+            mode=mode,  # type: ignore[arg-type]
+            repeats=repeats,
+            expected_runtime_edges=expected,
+            forbidden_runtime_edges=forbidden,
+        )
+        privileged = (
+            envelope.network == "ALLOW"
+            or envelope.process_spawn == "ALLOW"
+            or envelope.filesystem == "PROJECT_WRITE"
+            or bool(envelope.allowed_env_names)
+        )
+        approval_reason = None
+        if privileged:
+            approval_reason = "Execution envelope grants network, process, project-write, or named-environment capability."
+        plan = ProbePlan(
+            plan_id=uuid.uuid4().hex[:16],
+            source=architecture.source,
+            risk=risk,
+            reasons=tuple(assessment["reasons"]),
+            target=target,
+            cases=(case,),
+            envelope=envelope,
+            approval_required=privileged,
+            approval_reason=approval_reason,
+        )
+        self.store.set_probe_plan(plan)
+        return {
+            "status": "APPROVAL_REQUIRED" if privileged else "READY",
+            "plan": plan.to_dict(),
+            "assessment": assessment,
+            "execution_policy": "The plan is frozen to this source snapshot. Expansion outside the envelope requires a new plan.",
+        }
+
+    def approve_probe_plan(self, plan_id: str, approved_by: str = "local-user") -> dict[str, Any]:
+        plan = self.store.get_probe_plan(plan_id)
+        if plan is None:
+            return {"status": "NOT_FOUND", "plan_id": plan_id}
+        architecture = self.map()
+        if plan.envelope.source_snapshot != (architecture.source.snapshot_id or ""):
+            return {"status": "STALE", "plan_id": plan_id, "reason": "source snapshot changed"}
+        self.store.approve_probe_plan(plan_id, approved_by)
+        return {
+            "status": "APPROVED",
+            "plan_id": plan_id,
+            "approved_by": approved_by,
+            "note": "Approval is a local policy signal, not cryptographic proof of human identity.",
+        }
+
+    def probe_run(self, plan_id: str) -> dict[str, Any]:
+        plan = self.store.get_probe_plan(plan_id)
+        if plan is None:
+            return {"status": "NOT_FOUND", "plan_id": plan_id}
+        architecture = self.map()
+        current_snapshot = architecture.source.snapshot_id or ""
+        if current_snapshot != plan.envelope.source_snapshot:
+            return {
+                "status": "STALE_PLAN",
+                "plan_id": plan_id,
+                "planned_snapshot": plan.envelope.source_snapshot,
+                "current_snapshot": current_snapshot,
+            }
+        if plan.approval_required and not self.store.get_probe_approval(plan_id):
+            return {
+                "status": "APPROVAL_REQUIRED",
+                "plan_id": plan_id,
+                "reason": plan.approval_reason,
+                "envelope": plan.envelope.to_dict(),
+            }
+
+        results: list[dict[str, Any]] = []
+        executed = 0
+        for case in plan.cases[: plan.envelope.max_cases]:
+            executable = Path(case.command[0]).name.lower() if case.command else ""
+            if executable not in {x.lower() for x in plan.envelope.allowed_executables}:
+                return {"status": "ENVELOPE_EXCEEDED", "reason": f"executable {executable!r} not allowed"}
+            repeats = min(max(case.repeats, 1), plan.envelope.max_repeats)
+            for attempt in range(repeats):
+                observation = observe_python(
+                    self.root,
+                    architecture.source,
+                    list(case.command),
+                    min(plan.envelope.max_runtime_seconds, 300),
+                    envelope=plan.envelope,
+                )
+                self.store.set_runtime_observation(observation)
+                self.store.set_json(
+                    "runtime_contract",
+                    {
+                        "expected_runtime_edges": list(case.expected_runtime_edges),
+                        "forbidden_runtime_edges": list(case.forbidden_runtime_edges),
+                    },
+                )
+                normalized = self._runtime_result(
+                    architecture,
+                    observation,
+                    case.expected_runtime_edges,
+                    case.forbidden_runtime_edges,
+                )
+                normalized["case_id"] = case.case_id
+                normalized["attempt"] = attempt + 1
+                results.append(normalized)
+                executed += 1
+                if observation.envelope_breaches or normalized["evidence_result"] == "VIOLATED_ON_TRACE":
+                    break
+            if results and results[-1]["evidence_result"] in {"ENVELOPE_EXCEEDED", "VIOLATED_ON_TRACE"}:
+                break
+
+        adaptive = self._adaptive_next_action(architecture, results, plan)
+        return {
+            "status": "COMPLETE" if results else "NO_CASES",
+            "plan_id": plan_id,
+            "executed_runs": executed,
+            "results": results,
+            "adaptive": adaptive,
+            "envelope": plan.envelope.to_dict(),
+        }
+
+    def _validate_envelope(self, envelope: ExecutionEnvelope) -> list[str]:
+        errors: list[str] = []
+        if envelope.filesystem not in {"READ_ONLY", "TEMP_WRITE", "PROJECT_WRITE"}:
+            errors.append("filesystem must be READ_ONLY, TEMP_WRITE, or PROJECT_WRITE")
+        if envelope.network not in {"DENY", "ALLOW"}:
+            errors.append("network must be DENY or ALLOW")
+        if envelope.process_spawn not in {"DENY", "ALLOW"}:
+            errors.append("process_spawn must be DENY or ALLOW")
+        if not envelope.allowed_executables:
+            errors.append("at least one executable must be allowed")
+        if envelope.max_cases < 1 or envelope.max_repeats < 1 or envelope.max_runtime_seconds < 1:
+            errors.append("case, repeat, and runtime limits must be positive")
+        return errors
+
+    def _adaptive_next_action(
+        self,
+        architecture: ArchitectureMap,
+        results: list[dict[str, Any]],
+        plan: ProbePlan,
+    ) -> dict[str, Any]:
+        if not results:
+            return {"evidence_sufficient": False, "next": "NO_EVIDENCE"}
+        last = results[-1]
+        if last.get("evidence_result") == "ENVELOPE_EXCEEDED":
+            return {
+                "evidence_sufficient": False,
+                "next": "NEW_PLAN_REQUIRED",
+                "reason": "Observed behavior exceeded the approved execution envelope.",
+            }
+        if last.get("evidence_result") == "VIOLATED_ON_TRACE":
+            return {
+                "evidence_sufficient": True,
+                "next": "VERIFY_AND_REPORT",
+                "reason": "A concrete architecture/runtime violation was observed; broader probing is unnecessary to establish this finding.",
+            }
+        runtime_only = last.get("observed_map", {}).get("runtime_only_edges", [])
+        if runtime_only:
+            targets = sorted({edge.get("target") for edge in runtime_only if isinstance(edge, dict) and edge.get("target")})
+            return {
+                "evidence_sufficient": False,
+                "next": "EXPAND_UNCERTAIN_BRANCH",
+                "targets": targets[:5],
+                "reason": "Runtime-only relationships remain unexplained; expand only those branches.",
+            }
+        coverage = last.get("observed_map", {}).get("coverage")
+        if coverage != "OBSERVED":
+            return {
+                "evidence_sufficient": False,
+                "next": "REFINE_PROBE",
+                "reason": f"Runtime coverage is {coverage}; do not broaden unrelated areas.",
+            }
+        return {
+            "evidence_sufficient": True,
+            "next": "VERIFY",
+            "reason": "No unresolved runtime-only branch or envelope breach was observed in the planned cases.",
+        }
 
     def verify(self, command: list[str] | None = None, timeout_seconds: int = 30) -> dict[str, Any]:
         architecture = self.map()
@@ -223,7 +539,9 @@ class StrawberryCore:
 
         expected_status = "NOT_CHECKED" if not expected else ("PASS" if not missing_expected else "FAIL")
         forbidden_status = "NOT_CHECKED" if not forbidden else ("PASS" if not observed_forbidden else "FAIL")
-        if hard or missing_expected or observed_forbidden:
+        if observation.envelope_breaches:
+            evidence_result = "ENVELOPE_EXCEEDED"
+        elif hard or missing_expected or observed_forbidden:
             evidence_result = "VIOLATED_ON_TRACE"
         elif observation.coverage != "OBSERVED":
             evidence_result = "INCONCLUSIVE"
@@ -244,6 +562,7 @@ class StrawberryCore:
                 "stdout": observation.stdout,
                 "stderr": observation.stderr,
                 "isolation": observation.isolation,
+                "envelope_breaches": list(observation.envelope_breaches),
             },
             "observed_map": {
                 "coverage": observation.coverage,

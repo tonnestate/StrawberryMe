@@ -8,7 +8,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from .models import Edge, RuntimeEffect, RuntimeObservation, SourceIdentity
+from .models import Edge, ExecutionEnvelope, RuntimeEffect, RuntimeObservation, SourceIdentity
 
 
 _BOOTSTRAP = r'''
@@ -26,6 +26,8 @@ os.makedirs(TRACE_DIR, exist_ok=True)
 _EDGES = set()
 _EFFECTS = []
 _IN_AUDIT = False
+_ENVELOPE = json.loads(os.environ.get("STRAWBERRY_EXECUTION_ENVELOPE", "{}"))
+_BREACHES = []
 
 
 def _module_id(filename):
@@ -69,6 +71,11 @@ def _profile(frame, event, arg):
         _EDGES.add((source, "CALL", target))
 
 
+def _deny(reason):
+    _BREACHES.append(reason)
+    raise PermissionError(f"StrawberryMe execution envelope blocked: {reason}")
+
+
 def _audit(event, args):
     global _IN_AUDIT
     if _IN_AUDIT:
@@ -84,16 +91,34 @@ def _audit(event, args):
                 if isinstance(path, bytes):
                     path = os.fsdecode(path)
                 if any(flag in str(mode) for flag in ("w", "a", "+", "x")):
-                    _EFFECTS.append({"actor": actor, "kind": "FILE_WRITE", "target": str(path)})
+                    target = os.path.abspath(path)
+                    _EFFECTS.append({"actor": actor, "kind": "FILE_WRITE", "target": target})
+                    fs = _ENVELOPE.get("filesystem", "PROJECT_WRITE")
+                    if fs == "READ_ONLY":
+                        _deny(f"FILE_WRITE:{target}")
+                    if fs == "TEMP_WRITE":
+                        try:
+                            in_project = os.path.commonpath([ROOT, target]) == ROOT
+                        except Exception:
+                            in_project = False
+                        allowed_state = target.startswith(os.path.join(ROOT, ".strawberry"))
+                        if in_project and not allowed_state:
+                            _deny(f"PROJECT_WRITE:{target}")
         elif event == "socket.connect" and actor:
             address = args[1] if len(args) > 1 else args[0]
-            _EFFECTS.append({"actor": actor, "kind": "NETWORK_CONNECT", "target": repr(address)})
+            target = repr(address)
+            _EFFECTS.append({"actor": actor, "kind": "NETWORK_CONNECT", "target": target})
+            if _ENVELOPE.get("network", "ALLOW") == "DENY":
+                _deny(f"NETWORK_CONNECT:{target}")
         elif event in {"subprocess.Popen", "os.system"} and actor:
-            _EFFECTS.append({"actor": actor, "kind": "PROCESS_SPAWN", "target": repr(args[0] if args else "")})
-    except Exception:
-        pass
+            target = repr(args[0] if args else "")
+            _EFFECTS.append({"actor": actor, "kind": "PROCESS_SPAWN", "target": target})
+            if _ENVELOPE.get("process_spawn", "ALLOW") == "DENY":
+                _deny(f"PROCESS_SPAWN:{target}")
     finally:
         _IN_AUDIT = False
+_ENVELOPE = json.loads(os.environ.get("STRAWBERRY_EXECUTION_ENVELOPE", "{}"))
+_BREACHES = []
 
 
 def _flush():
@@ -104,6 +129,7 @@ def _flush():
             for source, kind, target in sorted(_EDGES)
         ],
         "effects": _EFFECTS[-2000:],
+        "envelope_breaches": _BREACHES[-2000:],
     }
     target = os.path.join(TRACE_DIR, f"trace-{os.getpid()}.json")
     try:
@@ -171,6 +197,7 @@ def observe_python(
     source: SourceIdentity,
     command: list[str],
     timeout_seconds: int = 30,
+    envelope: ExecutionEnvelope | None = None,
 ) -> RuntimeObservation:
     if not command:
         raise ValueError("command must not be empty")
@@ -193,6 +220,11 @@ def observe_python(
     env["PYTHONPATH"] = os.pathsep.join(pythonpath)
     env["STRAWBERRY_TRACE_ROOT"] = str(root.resolve())
     env["STRAWBERRY_TRACE_DIR"] = str(trace_dir.resolve())
+    if envelope is not None:
+        env["STRAWBERRY_EXECUTION_ENVELOPE"] = json.dumps(envelope.to_dict(), sort_keys=True)
+        keep = {"PATH", "PYTHONPATH", "PYTHONHOME", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "LANG", "LC_ALL"}
+        keep.update(envelope.allowed_env_names)
+        env = {key: value for key, value in env.items() if key in keep or key.startswith("STRAWBERRY_")}
     run_command = _instrumented_command(command, instrument_dir, env)
 
     try:
@@ -217,6 +249,7 @@ def observe_python(
 
     edges_by_key: dict[str, Edge] = {}
     effects: list[RuntimeEffect] = []
+    breaches: list[str] = []
     trace_files = sorted(trace_dir.glob("trace-*.json"))
     for trace_file in trace_files:
         try:
@@ -235,6 +268,7 @@ def observe_python(
             )
             if edge.source and edge.target:
                 edges_by_key[edge.key] = edge
+        breaches.extend(str(item) for item in raw.get("envelope_breaches", []))
         for item in raw.get("effects", []):
             if not isinstance(item, dict):
                 continue
@@ -265,6 +299,7 @@ def observe_python(
         edges=tuple(sorted(edges_by_key.values(), key=lambda edge: edge.key)),
         effects=tuple(sorted(unique_effects.values(), key=lambda effect: (effect.actor, effect.kind, effect.target))),
         trace_files=len(trace_files),
+        envelope_breaches=tuple(sorted(set(breaches))),
     )
 
     shutil.rmtree(trace_dir, ignore_errors=True)

@@ -1,60 +1,111 @@
 ---
 name: strawberryme
-description: Persistent architecture orientation and observed architecture verification for software-engineering agents. Use StrawberryMe to preserve source identity, I/O boundaries, dependencies, system boundaries, intended structural deltas and bounded runtime evidence across coding work.
+description: Adaptive architecture orientation and source-bound runtime evidence for software-engineering agents. Use StrawberryMe to choose the smallest useful verification path, preserve I/O and dependency orientation, detect architecture drift and expand only unresolved evidence branches.
 ---
 
 # StrawberryMe Skill
 
-StrawberryMe is an architecture-orientation and verification interface, not a coding agent. It contains no planner, built-in LLM, autonomous task manager, deployment authority or requirement for a permanently running agent.
+StrawberryMe is an architecture-orientation and evidence interface, not a coding agent. It contains no planner, built-in LLM, autonomous task manager, commit policy or deployment authority.
 
-Use this loop when StrawberryMe is available:
+## Operating principle
 
-1. `strawberry_status` — establish repository/source identity, Current MAP health and whether a previous runtime observation is current or stale.
-2. `strawberry_cursor` — orient on the target. Read inputs, outputs, upstream/downstream dependencies and known static boundary violations. Keep the horizon bounded.
-3. `strawberry_preflight` — when the change intentionally alters architecture edges, record only the expected additions/removals. Do not model a complete Future MAP for a local change.
-4. Implement the code with the normal coding tool or harness.
-5. `strawberry_observe` — when runtime behavior can materially change the claim, execute one explicit Python entrypoint and inspect the Observed MAP, runtime-only edges, selected side effects and runtime boundary result.
-6. `strawberry_verify` — rescan, compile-check, evaluate static boundaries, compare the Future Delta and incorporate only source-bound runtime evidence before claiming completion.
+Do not run the same checklist for every change.
 
-Rules:
+Use this control loop:
 
-- Do not treat the model's remembered repository structure as authoritative when StrawberryMe has current source evidence.
+1. `strawberry_status` — establish current source identity and existing evidence state.
+2. `strawberry_assess` — evaluate the concrete change scope. Treat LOW/MEDIUM/HIGH as deterministic routing states, not probabilities.
+3. Use `strawberry_cursor(..., adaptive=true)` when orientation is needed. Do not expand the graph beyond the evidence-relevant horizon.
+4. Use `strawberry_preflight` only when architecture edges are intentionally expected to change.
+5. Implement with the normal coding harness.
+6. If assessment or later evidence shows runtime uncertainty, create `strawberry_probe_plan` rather than directly broadening the investigation.
+7. Run only a READY/approved plan with `strawberry_probe_run`.
+8. Follow the returned adaptive next action. Expand only targets named by unresolved runtime evidence.
+9. Call `strawberry_verify` before claiming completion when StrawberryMe evidence is part of the task.
+
+## Evidence rules
+
 - `BUILD PASS` does not imply `ARCHITECTURE PASS`.
 - `STATIC PASS` does not imply `RUNTIME PASS`.
-- A matching output does not make an unintended dependency acceptable.
-- Use runtime observation when dynamic imports, plugin wiring, dependency injection, runtime dispatch or an important system boundary may not be resolved statically.
-- Do not treat one runtime trace as whole-program coverage.
-- Treat `SATISFIED_ON_TRACE` literally: it applies only to that source snapshot and execution.
-- Never reuse runtime evidence after StrawberryMe marks it `STALE`.
-- If StrawberryMe reports `AMBIGUOUS`, `NOT_FOUND`, parse errors, unknown runtime coverage or unresolved drift, do not invent missing architecture facts. Inspect or narrow the target.
-- Architecture rules must represent project boundaries, not generic style preferences.
-- Record only intentional structural changes in the Future Delta.
-- Treat Current MAP and Observed MAP as technical projections, not canonical truth.
-- StrawberryMe v0.2 is Python-first. Dynamic/native behavior outside the observed Python trace may remain unresolved.
-- The runtime probe is not a security sandbox. Prefer the host harness sandbox when available.
-- StrawberryMe never decides commit, deployment, product acceptance or governance authority.
-- Keep the MAP Cursor bounded. Expand the horizon only when evidence requires it.
+- `SATISFIED_ON_TRACE` applies only to the bound source snapshot and executed trace.
+- Never reuse `STALE` evidence or a `STALE_PLAN`.
+- Never convert `UNKNOWN`, missing coverage or parse errors into success.
+- Do not invent architecture facts when a cursor is ambiguous or incomplete.
+- A runtime-only edge is a reason to inspect that branch, not the whole repository.
+- A concrete violation is already useful evidence; do not expand the probe merely to accumulate more failures.
 
-Minimal operating model:
+## Execution Envelope
+
+Treat the execution envelope literally.
+
+It can constrain:
+
+- source snapshot;
+- allowed executable class;
+- filesystem write policy;
+- network access;
+- process spawning;
+- named environment-variable access;
+- case count;
+- repeat count;
+- runtime budget.
+
+If StrawberryMe reports `ENVELOPE_EXCEEDED`, stop. Do not bypass the envelope. Create a new plan with the required capability and obtain approval through the user/harness-controlled path.
+
+Capability-expanding approval is a policy signal. Do not describe it as proof of human identity unless the host provides an authenticated human-approval mechanism.
+
+Never print or persist secret values. Only environment-variable names belong in plans or reports.
+
+## Adaptive routing
+
+Typical routing:
 
 ```text
-STATUS
-  source identity + observation freshness
-      ↓
-CURSOR
-  position + INPUT + OUTPUT + dependencies
-      ↓
-PREFLIGHT
-  expected static structural delta
-      ↓
-IMPLEMENT
-  normal coding harness
-      ↓
-OBSERVE
-  explicit execution → Observed MAP
-      ↓
-VERIFY
-  build + static boundary + delta + bound runtime evidence
+LOW
+→ static only
+
+MEDIUM
+→ bounded cursor + verify
+
+HIGH
+→ minimal runtime probe
 ```
 
-The purpose of StrawberryMe is to preserve architectural orientation outside model context and to make declared, static and observed architecture disagreements visible before a coding agent claims completion.
+Escalation reasons can include:
+
+```text
+ARCHITECTURE_BOUNDARY_TOUCHED
+DYNAMIC_BEHAVIOR_SIGNAL
+STATIC_MAP_INCOMPLETE
+EXPECTED_DELTA_ACTIVE
+RUNTIME_ONLY_EDGE_PREVIOUSLY_OBSERVED
+```
+
+Use the reason codes rather than guessing a confidence percentage.
+
+## Runtime interpretation
+
+Possible next actions include:
+
+```text
+NEW_PLAN_REQUIRED
+VERIFY_AND_REPORT
+EXPAND_UNCERTAIN_BRANCH
+REFINE_PROBE
+VERIFY
+```
+
+When `EXPAND_UNCERTAIN_BRANCH` is returned, narrow the next cursor/probe to the supplied target nodes. Do not turn it into repository-wide archaeology.
+
+## Harness lifecycle
+
+Where the host provides lifecycle hooks, prefer deterministic StrawberryMe integration:
+
+- session start / context restoration → compact status/orientation;
+- pre-compaction → preserve architecture orientation;
+- code edit → assess touched scope, remaining silent for LOW-risk changes;
+- stop/completion → block only on concrete current failures.
+
+Do not require hook support. MCP and CLI remain the portable baseline.
+
+The purpose of StrawberryMe is to keep architectural cognition and bounded execution evidence outside the model context while spending only the analysis effort that current evidence justifies.

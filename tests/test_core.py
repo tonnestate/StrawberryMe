@@ -153,3 +153,118 @@ def test_runtime_observation_records_file_write_effect(tmp_path: Path) -> None:
         and effect["target"].endswith("out.txt")
         for effect in observed["observed_map"]["effects"]
     )
+
+
+def test_assess_change_escalates_dynamic_code(tmp_path: Path) -> None:
+    (tmp_path / "app/application").mkdir(parents=True)
+    target = tmp_path / "app/application/service.py"
+    target.write_text(
+        "import importlib\n\ndef run(name: str):\n    return importlib.import_module(name)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "strawberry.toml").write_text(
+        '[boundaries.application]\npaths = ["app/application/**"]\n', encoding="utf-8"
+    )
+    result = StrawberryCore(tmp_path).assess_change(paths=["app/application/service.py"])
+    assert result["risk"] == "HIGH"
+    assert "DYNAMIC_BEHAVIOR_SIGNAL" in result["reasons"]
+    assert result["recommended_path"] == "MINIMAL_RUNTIME_PROBE"
+
+
+def test_probe_plan_compiles_safe_execution_envelope(tmp_path: Path) -> None:
+    import sys
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("def run() -> int:\n    return 1\n", encoding="utf-8")
+    core = StrawberryCore(tmp_path)
+    planned = core.probe_plan(
+        [sys.executable, "-c", "from app.a import run; run()"],
+        paths=["app/a.py"],
+    )
+    assert planned["status"] == "READY"
+    envelope = planned["plan"]["envelope"]
+    assert envelope["network"] == "DENY"
+    assert envelope["process_spawn"] == "DENY"
+    assert envelope["filesystem"] == "TEMP_WRITE"
+    assert envelope["source_snapshot"]
+
+
+def test_probe_run_rejects_stale_plan(tmp_path: Path) -> None:
+    import sys
+
+    (tmp_path / "app").mkdir()
+    target = tmp_path / "app/a.py"
+    target.write_text("def run() -> int:\n    return 1\n", encoding="utf-8")
+    core = StrawberryCore(tmp_path)
+    planned = core.probe_plan([sys.executable, "-c", "from app.a import run; run()"], paths=["app/a.py"])
+    plan_id = planned["plan"]["plan_id"]
+    target.write_text("def run() -> int:\n    return 2\n", encoding="utf-8")
+    result = core.probe_run(plan_id)
+    assert result["status"] == "STALE_PLAN"
+
+
+def test_execution_envelope_blocks_project_write(tmp_path: Path) -> None:
+    import sys
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text(
+        "from pathlib import Path\n\ndef run() -> None:\n    Path('forbidden.txt').write_text('x')\n",
+        encoding="utf-8",
+    )
+    core = StrawberryCore(tmp_path)
+    planned = core.probe_plan(
+        [sys.executable, "-c", "from app.a import run; run()"],
+        paths=["app/a.py"],
+        filesystem="TEMP_WRITE",
+    )
+    result = core.probe_run(planned["plan"]["plan_id"])
+    assert result["results"][0]["evidence_result"] == "ENVELOPE_EXCEEDED"
+    assert result["adaptive"]["next"] == "NEW_PLAN_REQUIRED"
+    assert not (tmp_path / "forbidden.txt").exists()
+
+
+def test_privileged_probe_requires_explicit_local_approval(tmp_path: Path) -> None:
+    import sys
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("def run() -> int:\n    return 1\n", encoding="utf-8")
+    core = StrawberryCore(tmp_path)
+    planned = core.probe_plan(
+        [sys.executable, "-c", "from app.a import run; run()"],
+        paths=["app/a.py"],
+        network="ALLOW",
+    )
+    assert planned["status"] == "APPROVAL_REQUIRED"
+    plan_id = planned["plan"]["plan_id"]
+    blocked = core.probe_run(plan_id)
+    assert blocked["status"] == "APPROVAL_REQUIRED"
+    approved = core.approve_probe_plan(plan_id, approved_by="test-user")
+    assert approved["status"] == "APPROVED"
+    completed = core.probe_run(plan_id)
+    assert completed["status"] == "COMPLETE"
+
+
+def test_adaptive_cursor_uses_risk_signals(tmp_path: Path) -> None:
+    (tmp_path / "app/application").mkdir(parents=True)
+    (tmp_path / "app/db").mkdir(parents=True)
+    (tmp_path / "app/application/service.py").write_text(
+        "import importlib\n\ndef handle() -> None:\n    importlib.import_module('app.db.repo')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app/db/repo.py").write_text("def save():\n    pass\n", encoding="utf-8")
+    (tmp_path / "strawberry.toml").write_text(
+        '[boundaries.application]\npaths=["app/application/**"]\n[boundaries.database]\npaths=["app/db/**"]\n',
+        encoding="utf-8",
+    )
+    result = StrawberryCore(tmp_path).cursor("handle", adaptive=True)
+    assert result["adaptive"] is True
+    assert result["horizon"] == 2
+    assert "DYNAMIC_BEHAVIOR_SIGNAL" in result["expansion_basis"]
+
+
+def test_claude_stop_gate_blocks_static_violation(tmp_path: Path) -> None:
+    from strawberryme.claude_hook import stop
+
+    make_project(tmp_path)
+    result = stop(StrawberryCore(tmp_path))
+    assert result["decision"] == "block"
