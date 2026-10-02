@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,7 @@ from .models import ArchitectureMap, Edge, Node
 from .signals import detect_dynamic_signals
 from .source import source_identity
 
-PARSER_VERSION = "py-ast-v2"
+PARSER_VERSION = "py-ast-v3"
 
 
 def _annotation(node: ast.AST | None) -> str:
@@ -29,13 +30,18 @@ def _module_name(root: Path, file: Path) -> str:
     return ".".join(parts)
 
 
+def _cache_version(root: Path) -> str:
+    path = root / "strawberry.toml"
+    digest = hashlib.sha256(path.read_bytes() if path.exists() else b"").hexdigest()[:16]
+    return f"{PARSER_VERSION}:{digest}"
+
+
 def _resolve_module(imported: str, known_modules: set[str]) -> str | None:
     if imported in known_modules:
         return imported
-    matches = [m for m in known_modules if m.startswith(imported + ".") or imported.startswith(m + ".")]
-    if not matches:
-        return None
-    return sorted(matches, key=len, reverse=True)[0]
+    # Only resolve to a parent package. Never guess an arbitrary child module.
+    parents = [m for m in known_modules if imported.startswith(m + ".")]
+    return sorted(parents, key=len, reverse=True)[0] if parents else None
 
 
 def _dotted(node: ast.AST | None) -> str | None:
@@ -64,6 +70,7 @@ def _parse_file(root: Path, file: Path, config: Config) -> dict[str, Any]:
         return payload
 
     aliases: dict[str, str] = {}
+
     class Visitor(ast.NodeVisitor):
         def __init__(self) -> None:
             self.stack: list[str] = []
@@ -71,9 +78,7 @@ def _parse_file(root: Path, file: Path, config: Config) -> dict[str, Any]:
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
             qual = ".".join([module, *self.stack, node.name]).strip(".")
             payload["nodes"].append(Node(f"symbol:{qual}", "class", rel, node.name, qual, boundary).to_dict())
-            self.stack.append(node.name)
-            self.generic_visit(node)
-            self.stack.pop()
+            self.stack.append(node.name); self.generic_visit(node); self.stack.pop()
 
         def _function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
             qual = ".".join([module, *self.stack, node.name]).strip(".")
@@ -85,9 +90,7 @@ def _parse_file(root: Path, file: Path, config: Config) -> dict[str, Any]:
             output = _annotation(node.returns)
             outputs = () if output in {"None", "unknown"} else (output,)
             payload["nodes"].append(Node(f"symbol:{qual}", "function", rel, node.name, qual, boundary, inputs, outputs).to_dict())
-            self.stack.append(node.name)
-            self.generic_visit(node)
-            self.stack.pop()
+            self.stack.append(node.name); self.generic_visit(node); self.stack.pop()
 
         visit_FunctionDef = _function
         visit_AsyncFunctionDef = _function
@@ -99,7 +102,7 @@ def _parse_file(root: Path, file: Path, config: Config) -> dict[str, Any]:
             for alias in node.names:
                 local = alias.asname or alias.name.split(".")[0]
                 aliases[local] = alias.name if alias.asname else alias.name.split(".")[0]
-                payload["imports"].append({"module": alias.name, "line": getattr(node, "lineno", 0)})
+                payload["imports"].append({"base": alias.name, "member": None, "line": getattr(node, "lineno", 0)})
         elif isinstance(node, ast.ImportFrom):
             package = module if file.stem == "__init__" else module.rsplit(".", 1)[0] if "." in module else ""
             if node.level:
@@ -110,13 +113,15 @@ def _parse_file(root: Path, file: Path, config: Config) -> dict[str, Any]:
                 base = ".".join([*parts, node.module] if node.module else parts)
             else:
                 base = node.module or ""
-            if base:
-                payload["imports"].append({"module": base, "line": getattr(node, "lineno", 0)})
             for alias in node.names:
                 if alias.name == "*":
+                    if base:
+                        payload["imports"].append({"base": base, "member": None, "line": getattr(node, "lineno", 0)})
                     continue
                 local = alias.asname or alias.name
                 aliases[local] = ".".join(part for part in (base, alias.name) if part)
+                if base:
+                    payload["imports"].append({"base": base, "member": alias.name, "line": getattr(node, "lineno", 0)})
         elif isinstance(node, ast.Call):
             dotted = _dotted(node.func)
             if dotted:
@@ -131,6 +136,7 @@ def _parse_file(root: Path, file: Path, config: Config) -> dict[str, Any]:
 
 def scan_python(root: Path, config: Config, store: Any | None = None) -> ArchitectureMap:
     root = root.resolve()
+    cache_version = _cache_version(root)
     py_files = [f for f in root.rglob("*.py") if not config.excluded(f.relative_to(root).as_posix())]
     module_by_file = {f: _module_name(root, f) for f in py_files}
     known_modules = {m for m in module_by_file.values() if m}
@@ -140,20 +146,17 @@ def scan_python(root: Path, config: Config, store: Any | None = None) -> Archite
 
     current_paths = {f.relative_to(root).as_posix() for f in py_files}
     if store is not None:
-        store.prune_file_cache(current_paths, PARSER_VERSION)
+        store.prune_file_cache(current_paths, cache_version)
 
     for file in py_files:
-        rel = file.relative_to(root).as_posix()
-        stat = file.stat()
-        cached = store.get_file_cache(rel, PARSER_VERSION, stat.st_mtime_ns, stat.st_size) if store is not None else None
+        rel = file.relative_to(root).as_posix(); stat = file.stat()
+        cached = store.get_file_cache(rel, cache_version, stat.st_mtime_ns, stat.st_size) if store is not None else None
         if isinstance(cached, dict):
-            payload = cached
-            reused += 1
+            payload = cached; reused += 1
         else:
-            payload = _parse_file(root, file, config)
-            parsed += 1
+            payload = _parse_file(root, file, config); parsed += 1
             if store is not None:
-                store.set_file_cache(rel, PARSER_VERSION, stat.st_mtime_ns, stat.st_size, payload)
+                store.set_file_cache(rel, cache_version, stat.st_mtime_ns, stat.st_size, payload)
         payloads.append(payload)
 
     nodes: list[Node] = []
@@ -162,10 +165,8 @@ def scan_python(root: Path, config: Config, store: Any | None = None) -> Archite
     module_node_by_name: dict[str, str] = {}
     for payload in payloads:
         for raw in payload.get("nodes", []):
-            node = Node.from_dict(raw)
-            nodes.append(node)
-            if node.kind == "module":
-                module_node_by_name[node.qualname] = node.id
+            node = Node.from_dict(raw); nodes.append(node)
+            if node.kind == "module": module_node_by_name[node.qualname] = node.id
             else:
                 symbols_by_qual[node.qualname] = node.id
                 symbols_by_short.setdefault(node.name, []).append(node.id)
@@ -175,34 +176,28 @@ def scan_python(root: Path, config: Config, store: Any | None = None) -> Archite
 
     edges: dict[str, Edge] = {}
     for payload in payloads:
-        module = payload["module"]
-        source_id = f"module:{module or payload['path']}"
-        rel = payload["path"]
+        module = payload["module"]; source_id = f"module:{module or payload['path']}"; rel = payload["path"]
         for item in payload.get("imports", []):
-            target_module = _resolve_module(str(item["module"]), known_modules)
+            base = str(item.get("base", "")); member = item.get("member")
+            candidate = f"{base}.{member}" if base and member else base
+            target_module = candidate if candidate in known_modules else _resolve_module(base, known_modules)
             if target_module and target_module != module:
-                edge = Edge(source_id, f"module:{target_module}", "IMPORT", evidence=f"{rel}:{item['line']}")
+                edge = Edge(source_id, f"module:{target_module}", "IMPORT", evidence=f"{rel}:{item['line']}", resolution="EXACT")
                 edges[edge.key] = edge
         for item in payload.get("calls", []):
-            name = str(item["name"])
-            target: str | None = None
+            name = str(item["name"]); target: str | None = None; resolution = "EXACT"
             if name in symbols_by_qual:
                 target = symbols_by_qual[name]
             else:
                 pieces = name.split(".")
                 for i in range(len(pieces), 0, -1):
-                    candidate_module = ".".join(pieces[:i-1])
                     candidate_symbol = ".".join(pieces[:i])
                     if candidate_symbol in symbols_by_qual:
-                        target = symbols_by_qual[candidate_symbol]
-                        break
-                    if candidate_module in module_node_by_name and pieces[-1] in symbols_by_short and len(symbols_by_short[pieces[-1]]) == 1:
-                        target = symbols_by_short[pieces[-1]][0]
-                        break
+                        target = symbols_by_qual[candidate_symbol]; break
                 if target is None and len(symbols_by_short.get(pieces[-1], [])) == 1:
-                    target = symbols_by_short[pieces[-1]][0]
+                    target = symbols_by_short[pieces[-1]][0]; resolution = "HEURISTIC"
             if target and target != source_id:
-                edge = Edge(source_id, target, "CALL", evidence=f"{rel}:{item['line']}")
+                edge = Edge(source_id, target, "CALL", evidence=f"{rel}:{item['line']}", resolution=resolution)  # type: ignore[arg-type]
                 edges[edge.key] = edge
 
     result.nodes = sorted(nodes, key=lambda n: n.id)
@@ -210,6 +205,6 @@ def scan_python(root: Path, config: Config, store: Any | None = None) -> Archite
     result.scan_stats = {
         "files": len(py_files), "parsed_files": parsed, "reused_files": reused,
         "cache_hit_ratio": round(reused / len(py_files), 4) if py_files else 1.0,
-        "parser_version": PARSER_VERSION,
+        "parser_version": cache_version,
     }
     return result

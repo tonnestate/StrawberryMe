@@ -353,3 +353,153 @@ def test_history_reports_static_architecture_diff_between_verifications(tmp_path
     assert diff is not None
     assert "module:app.a|IMPORT|module:app.b" in diff["added_static_edges"]
     assert "module:app.a|CALL|symbol:app.b.work" in diff["added_static_edges"]
+
+
+def _git_init(root: Path) -> None:
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Strawberry Test"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "baseline"], check=True)
+
+
+def test_git_snapshot_ignores_strawberry_state(tmp_path: Path) -> None:
+    import sys
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    _git_init(tmp_path)
+    core = StrawberryCore(tmp_path)
+    planned = core.probe_plan([sys.executable, "-c", "from app.a import run; run()"], paths=["app/a.py"])
+    before = planned["plan"]["envelope"]["source_snapshot"]
+    result = core.probe_run(planned["plan"]["plan_id"])
+    after = core.status()["source"]["snapshot_id"]
+    assert result["status"] == "COMPLETE"
+    assert before == after
+    assert ".strawberry" not in core.status()["source"]["dirty_files"]
+
+
+def test_map_cache_invalidates_when_config_changes(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("from app.b import work\nwork()\n", encoding="utf-8")
+    (tmp_path / "app/b.py").write_text("def work():\n    pass\n", encoding="utf-8")
+    cfg = tmp_path / "strawberry.toml"
+    cfg.write_text('''[boundaries.application]\npaths=["app/a.py"]\n[boundaries.database]\npaths=["app/b.py"]\n[[rules]]\nsource="application"\ntarget="storage"\nmode="forbid"\nseverity="HARD"\n''', encoding="utf-8")
+    core = StrawberryCore(tmp_path)
+    assert core.verify()["boundary"]["status"] == "PASS"
+    cfg.write_text('''[boundaries.application]\npaths=["app/a.py"]\n[boundaries.storage]\npaths=["app/b.py"]\n[[rules]]\nsource="application"\ntarget="storage"\nmode="forbid"\nseverity="HARD"\n''', encoding="utf-8")
+    result = core.verify()
+    assert result["boundary"]["status"] == "FAIL"
+
+
+def test_envelope_blocks_os_open_and_strawberry_prefix_bypass(tmp_path: Path) -> None:
+    import sys
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text(
+        "import os\n\ndef run():\n    fd=os.open('.strawberry_evil.txt', os.O_WRONLY|os.O_CREAT); os.close(fd)\n",
+        encoding="utf-8",
+    )
+    core = StrawberryCore(tmp_path)
+    plan = core.probe_plan([sys.executable, "-c", "from app.a import run; run()"], paths=["app/a.py"])
+    result = core.probe_run(plan["plan"]["plan_id"])
+    assert result["results"][0]["evidence_result"] == "ENVELOPE_EXCEEDED"
+    assert not (tmp_path / ".strawberry_evil.txt").exists()
+
+
+def test_envelope_blocks_evidence_database_access(tmp_path: Path) -> None:
+    import sys
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text(
+        "import sqlite3\n\ndef run():\n    sqlite3.connect('.strawberry/strawberry.db').execute('DELETE FROM evidence_history')\n",
+        encoding="utf-8",
+    )
+    core = StrawberryCore(tmp_path)
+    plan = core.probe_plan([sys.executable, "-c", "from app.a import run; run()"], paths=["app/a.py"])
+    result = core.probe_run(plan["plan"]["plan_id"])
+    assert result["results"][0]["evidence_result"] == "ENVELOPE_EXCEEDED"
+
+
+def test_envelope_blocks_posix_spawn_when_available(tmp_path: Path) -> None:
+    import os, sys, pytest
+    if not hasattr(os, "posix_spawn"):
+        pytest.skip("posix_spawn unavailable")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text(
+        "import os,sys\n\ndef run():\n    os.posix_spawn(sys.executable,[sys.executable,'-c','pass'],os.environ.copy())\n",
+        encoding="utf-8",
+    )
+    core = StrawberryCore(tmp_path)
+    plan = core.probe_plan([sys.executable, "-c", "from app.a import run; run()"], paths=["app/a.py"])
+    result = core.probe_run(plan["plan"]["plan_id"])
+    assert result["results"][0]["evidence_result"] == "ENVELOPE_EXCEEDED"
+
+
+def test_import_from_package_member_prefers_real_submodule(tmp_path: Path) -> None:
+    (tmp_path / "app/db").mkdir(parents=True)
+    (tmp_path / "app/service.py").write_text("from app.db import repo\nrepo.save()\n", encoding="utf-8")
+    (tmp_path / "app/db/repo.py").write_text("def save():\n    pass\n", encoding="utf-8")
+    edges = StrawberryCore(tmp_path).map().edges
+    assert any(e.kind == "IMPORT" and e.target == "module:app.db.repo" for e in edges)
+    assert any(e.kind == "CALL" and e.target == "symbol:app.db.repo.save" and e.resolution == "EXACT" for e in edges)
+
+
+def test_dynamic_signals_resolve_aliases_and_ignore_literal_getattr(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text(
+        "from importlib import import_module as load\nimport subprocess as sp\n\ndef run(name,obj):\n    load(name)\n    sp.run(['x'])\n    getattr(obj,'known')\n",
+        encoding="utf-8",
+    )
+    signals = StrawberryCore(tmp_path).map().dynamic_signals
+    kinds = {x["signal"] for x in signals}
+    assert "DYNAMIC_IMPORT" in kinds
+    assert "PROCESS_CREATION" in kinds
+    assert "REFLECTIVE_ACCESS" not in kinds
+
+
+def test_heuristic_call_resolution_is_marked(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("def run(obj):\n    obj.go()\n", encoding="utf-8")
+    (tmp_path / "app/b.py").write_text("def go():\n    pass\n", encoding="utf-8")
+    calls = [e for e in StrawberryCore(tmp_path).map().edges if e.kind == "CALL"]
+    assert any(e.target == "symbol:app.b.go" and e.resolution == "HEURISTIC" for e in calls)
+
+
+def test_compile_check_does_not_create_pycache(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("x=1\n", encoding="utf-8")
+    result = StrawberryCore(tmp_path).verify()
+    assert result["build"]["status"] == "PASS"
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
+def test_claude_session_context_uses_additional_context(tmp_path: Path) -> None:
+    from strawberryme.claude_hook import session_context
+    (tmp_path / "app").mkdir(); (tmp_path / "app/a.py").write_text("x=1\n", encoding="utf-8")
+    result = session_context(StrawberryCore(tmp_path))
+    assert "systemMessage" not in result
+    assert "additionalContext" in result["hookSpecificOutput"]
+
+
+def test_claude_stop_pass_omits_approve_and_recursion_guard(tmp_path: Path) -> None:
+    from strawberryme.claude_hook import stop
+    (tmp_path / "app").mkdir(); (tmp_path / "app/a.py").write_text("x=1\n", encoding="utf-8")
+    core = StrawberryCore(tmp_path)
+    passed = stop(core, {})
+    assert "decision" not in passed
+    guarded = stop(core, {"stop_hook_active": True})
+    assert "decision" not in guarded
+
+
+def test_envelope_blocks_remove_and_rename(tmp_path: Path) -> None:
+    import sys
+    (tmp_path / "app").mkdir()
+    victim = tmp_path / "victim.txt"; victim.write_text("keep", encoding="utf-8")
+    (tmp_path / "app/a.py").write_text(
+        "import os\n\ndef run():\n    os.rename('victim.txt','moved.txt')\n",
+        encoding="utf-8",
+    )
+    core = StrawberryCore(tmp_path)
+    plan = core.probe_plan([sys.executable, "-c", "from app.a import run; run()"], paths=["app/a.py"])
+    result = core.probe_run(plan["plan"]["plan_id"])
+    assert result["results"][0]["evidence_result"] == "ENVELOPE_EXCEEDED"
+    assert victim.exists() and not (tmp_path / "moved.txt").exists()

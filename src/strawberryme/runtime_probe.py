@@ -19,35 +19,50 @@ import json
 import os
 import runpy
 import sys
+import threading
 
 ROOT = os.path.abspath(os.environ["STRAWBERRY_TRACE_ROOT"])
+STATE_DIR = os.path.join(ROOT, ".strawberry")
 TRACE_DIR = os.path.abspath(os.environ["STRAWBERRY_TRACE_DIR"])
 os.makedirs(TRACE_DIR, exist_ok=True)
 _EDGES = set()
 _EFFECTS = []
 _IN_AUDIT = False
+_MODULE_CACHE = {}
 _ENVELOPE = json.loads(os.environ.get("STRAWBERRY_EXECUTION_ENVELOPE", "{}"))
 _BREACHES = []
 
+def _inside(parent, child):
+    try:
+        return os.path.commonpath([os.path.abspath(parent), os.path.abspath(child)]) == os.path.abspath(parent)
+    except Exception:
+        return False
 
 def _module_id(filename):
     if not filename or filename.startswith("<"):
         return None
+    cached = _MODULE_CACHE.get(filename)
+    if cached is not None:
+        return cached or None
     try:
         path = os.path.abspath(filename)
-        if os.path.commonpath([ROOT, path]) != ROOT:
+        if not _inside(ROOT, path):
+            _MODULE_CACHE[filename] = ""
             return None
         rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
     except Exception:
+        _MODULE_CACHE[filename] = ""
         return None
     if rel.startswith(".strawberry/") or not rel.endswith(".py"):
+        _MODULE_CACHE[filename] = ""
         return None
     rel = rel[:-3]
     if rel.endswith("/__init__"):
         rel = rel[:-9]
     name = rel.strip("/").replace("/", ".")
-    return f"module:{name or rel}"
-
+    value = f"module:{name or rel}"
+    _MODULE_CACHE[filename] = value
+    return value
 
 def _actor():
     frame = sys._getframe(2)
@@ -57,7 +72,6 @@ def _actor():
             return module
         frame = frame.f_back
     return None
-
 
 def _profile(frame, event, arg):
     if event != "call":
@@ -70,11 +84,24 @@ def _profile(frame, event, arg):
     if source and target and source != target:
         _EDGES.add((source, "CALL", target))
 
-
 def _deny(reason):
     _BREACHES.append(reason)
     raise PermissionError(f"StrawberryMe execution envelope blocked: {reason}")
 
+def _record(actor, kind, target):
+    if actor:
+        _EFFECTS.append({"actor": actor, "kind": kind, "target": str(target)})
+
+def _check_path(actor, target, kind="FILE_WRITE"):
+    target = os.path.abspath(os.fspath(target))
+    if _inside(STATE_DIR, target):
+        _deny(f"STATE_ACCESS:{target}")
+    _record(actor, kind, target)
+    fs = _ENVELOPE.get("filesystem", "PROJECT_WRITE")
+    if fs == "READ_ONLY":
+        _deny(f"{kind}:{target}")
+    if fs == "TEMP_WRITE" and _inside(ROOT, target):
+        _deny(f"PROJECT_WRITE:{target}")
 
 def _audit(event, args):
     global _IN_AUDIT
@@ -83,51 +110,51 @@ def _audit(event, args):
     _IN_AUDIT = True
     try:
         actor = _actor()
-        if event == "open" and actor and args:
+        if not actor:
+            return
+        if event == "open" and args:
             raw_path = args[0]
-            mode = args[1] if len(args) > 1 else "r"
             if isinstance(raw_path, (str, bytes, os.PathLike)):
-                path = os.fspath(raw_path)
-                if isinstance(path, bytes):
-                    path = os.fsdecode(path)
-                if any(flag in str(mode) for flag in ("w", "a", "+", "x")):
-                    target = os.path.abspath(path)
-                    _EFFECTS.append({"actor": actor, "kind": "FILE_WRITE", "target": target})
-                    fs = _ENVELOPE.get("filesystem", "PROJECT_WRITE")
-                    if fs == "READ_ONLY":
-                        _deny(f"FILE_WRITE:{target}")
-                    if fs == "TEMP_WRITE":
-                        try:
-                            in_project = os.path.commonpath([ROOT, target]) == ROOT
-                        except Exception:
-                            in_project = False
-                        allowed_state = target.startswith(os.path.join(ROOT, ".strawberry"))
-                        if in_project and not allowed_state:
-                            _deny(f"PROJECT_WRITE:{target}")
-        elif event == "socket.connect" and actor:
-            address = args[1] if len(args) > 1 else args[0]
-            target = repr(address)
-            _EFFECTS.append({"actor": actor, "kind": "NETWORK_CONNECT", "target": target})
+                raw = os.fspath(raw_path)
+                path = os.fsdecode(raw) if isinstance(raw, bytes) else raw
+                target = os.path.abspath(path)
+                if _inside(STATE_DIR, target):
+                    _deny(f"STATE_ACCESS:{target}")
+                mode = args[1] if len(args) > 1 else "r"
+                flags = args[2] if len(args) > 2 else 0
+                write_mask = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+                writing = any(flag in str(mode) for flag in ("w", "a", "+", "x")) or (isinstance(flags, int) and bool(flags & write_mask))
+                if writing:
+                    _check_path(actor, target)
+        elif event in {"os.remove", "os.rmdir", "os.mkdir", "os.truncate", "os.chmod", "os.symlink", "os.link"} and args:
+            _check_path(actor, args[0], "FILE_MUTATION")
+        elif event == "os.rename" and len(args) >= 2:
+            _check_path(actor, args[0], "FILE_MUTATION")
+            _check_path(actor, args[1], "FILE_MUTATION")
+        elif event == "sqlite3.connect" and args:
+            raw = args[0]
+            if isinstance(raw, (str, bytes, os.PathLike)) and raw != ":memory:":
+                value = os.fspath(raw)
+                target = os.path.abspath(os.fsdecode(value) if isinstance(value, bytes) else value)
+                if _inside(STATE_DIR, target):
+                    _deny(f"STATE_ACCESS:{target}")
+        elif event in {"socket.connect", "socket.bind", "socket.sendto"}:
+            target = repr(args[-1] if args else "")
+            _record(actor, "NETWORK", target)
             if _ENVELOPE.get("network", "ALLOW") == "DENY":
-                _deny(f"NETWORK_CONNECT:{target}")
-        elif event in {"subprocess.Popen", "os.system"} and actor:
+                _deny(f"NETWORK:{target}")
+        elif event in {"subprocess.Popen", "os.system", "os.posix_spawn", "os.posix_spawnp", "os.fork", "os.forkpty", "os.exec"}:
             target = repr(args[0] if args else "")
-            _EFFECTS.append({"actor": actor, "kind": "PROCESS_SPAWN", "target": target})
+            _record(actor, "PROCESS_SPAWN", target)
             if _ENVELOPE.get("process_spawn", "ALLOW") == "DENY":
                 _deny(f"PROCESS_SPAWN:{target}")
     finally:
         _IN_AUDIT = False
-_ENVELOPE = json.loads(os.environ.get("STRAWBERRY_EXECUTION_ENVELOPE", "{}"))
-_BREACHES = []
-
 
 def _flush():
     payload = {
         "pid": os.getpid(),
-        "edges": [
-            {"source": source, "kind": kind, "target": target}
-            for source, kind, target in sorted(_EDGES)
-        ],
+        "edges": [{"source": s, "kind": k, "target": t} for s, k, t in sorted(_EDGES)],
         "effects": _EFFECTS[-2000:],
         "envelope_breaches": _BREACHES[-2000:],
     }
@@ -138,8 +165,9 @@ def _flush():
     except Exception:
         pass
 
-
+sys.dont_write_bytecode = True
 sys.setprofile(_profile)
+threading.setprofile(_profile)
 try:
     sys.addaudithook(_audit)
 except Exception:
@@ -202,13 +230,8 @@ def observe_python(
     if not command:
         raise ValueError("command must not be empty")
 
-    state_dir = root / ".strawberry"
-    state_dir.mkdir(exist_ok=True)
-    probe_parent = state_dir / "runtime"
-    probe_parent.mkdir(exist_ok=True)
     run_id = uuid.uuid4().hex
-    trace_dir = probe_parent / run_id
-    trace_dir.mkdir(parents=True, exist_ok=True)
+    trace_dir = Path(tempfile.mkdtemp(prefix=f"strawberry-runtime-{run_id[:8]}-"))
     instrument_dir = Path(tempfile.mkdtemp(prefix="instrument-", dir=trace_dir))
     (instrument_dir / "bootstrap.py").write_text(_BOOTSTRAP, encoding="utf-8")
 
@@ -218,11 +241,12 @@ def observe_python(
     if existing:
         pythonpath.append(existing)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["STRAWBERRY_TRACE_ROOT"] = str(root.resolve())
     env["STRAWBERRY_TRACE_DIR"] = str(trace_dir.resolve())
     if envelope is not None:
         env["STRAWBERRY_EXECUTION_ENVELOPE"] = json.dumps(envelope.to_dict(), sort_keys=True)
-        keep = {"PATH", "PYTHONPATH", "PYTHONHOME", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "LANG", "LC_ALL"}
+        keep = {"PATH", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONHOME", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "LANG", "LC_ALL"}
         keep.update(envelope.allowed_env_names)
         env = {key: value for key, value in env.items() if key in keep or key.startswith("STRAWBERRY_")}
     run_command = _instrumented_command(command, instrument_dir, env)

@@ -78,6 +78,11 @@ if MCPServer is not None:
         )
 
     @mcp.tool()
+    def strawberry_probe_approve(plan_id: str, approved_by: str = "local-user") -> dict[str, Any]:
+        """Approve a frozen source-bound probe plan after reviewing its execution envelope."""
+        return _core().approve_probe_plan(plan_id, approved_by=approved_by)
+
+    @mcp.tool()
     def strawberry_probe_run(plan_id: str) -> dict[str, Any]:
         """Execute a frozen probe plan inside its compiled execution envelope and return adaptive next action."""
         return _core().probe_run(plan_id)
@@ -114,7 +119,9 @@ else:
 def main() -> None:
     if _MCP_IMPORT_ERROR is not None:
         raise SystemExit('MCP support requires: pip install "strawberryme[mcp]"') from _MCP_IMPORT_ERROR
-    raise SystemExit("Run with the official MCP CLI, e.g. `mcp run src/strawberryme/server.py --transport stdio`.")
+    if mcp is None:
+        raise SystemExit("MCP server is unavailable")
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

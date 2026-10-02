@@ -7,6 +7,7 @@ EvidenceOrigin = Literal["STATIC", "DECLARED", "RUNTIME", "INFERRED"]
 EdgeKind = Literal["IMPORT", "CALL", "READ", "WRITE"]
 RiskLevel = Literal["LOW", "MEDIUM", "HIGH"]
 EnforcementStrength = Literal["NONE", "PYTHON_AUDIT", "HOST_MANAGED", "OS_ISOLATED"]
+Resolution = Literal["EXACT", "HEURISTIC"]
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ class Edge:
     kind: EdgeKind
     origin: EvidenceOrigin = "STATIC"
     evidence: str | None = None
+    resolution: Resolution = "EXACT"
 
     @property
     def key(self) -> str:
@@ -67,6 +69,7 @@ class Edge:
             kind=str(raw.get("kind", "CALL")),  # type: ignore[arg-type]
             origin=str(raw.get("origin", "STATIC")),  # type: ignore[arg-type]
             evidence=raw.get("evidence"),
+            resolution=str(raw.get("resolution", "EXACT")),  # type: ignore[arg-type]
         )
 
 

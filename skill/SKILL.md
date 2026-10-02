@@ -24,7 +24,7 @@ Do not run the full workflow mechanically for every edit.
 3. `strawberry_cursor` — open only the architecture neighborhood needed for the task. Prefer adaptive mode when the required horizon is unclear.
 4. `strawberry_preflight` — record only intentional static edge additions/removals when architecture is expected to change.
 5. Implement with the normal coding harness.
-6. When runtime behavior can materially change the claim, use `strawberry_probe_plan` then `strawberry_probe_run`. Do not bypass provider capability failures.
+6. When runtime behavior can materially change the claim, use `strawberry_probe_plan`, obtain `strawberry_probe_approve` only when the plan requires approval, then use `strawberry_probe_run`. Do not bypass provider capability failures.
 7. `strawberry_verify` — check build, static boundaries, expected delta and current source-bound runtime evidence before a completion claim.
 8. Use `strawberry_history` when the question is what structurally changed across verification states or runtime observations.
 

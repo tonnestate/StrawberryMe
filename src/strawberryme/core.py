@@ -3,12 +3,12 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
-import subprocess
 import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .config import Config, load_config
 from .models import ArchitectureMap, Delta, Edge, ExecutionEnvelope, Node, ProbeCase, ProbePlan, RuntimeObservation
 from .provider import ProviderRegistry
@@ -26,6 +26,7 @@ class StrawberryCore:
         self.providers = ProviderRegistry()
 
     def map(self) -> ArchitectureMap:
+        self.config = load_config(self.root)
         return scan_python(self.root, self.config, self.store)
 
     def status(self) -> dict[str, Any]:
@@ -33,8 +34,9 @@ class StrawberryCore:
         delta = self.store.get_delta()
         violations = self._boundary_violations(architecture)
         observation = self.store.get_runtime_observation()
+        latest_plan = self.store.get_latest_probe_plan()
         runtime_state: dict[str, Any] = {
-            "probe": "PYTHON_SITECUSTOMIZE",
+            "probe": "PYTHON_PROFILE_AUDIT_BOOTSTRAP",
             "isolation": "NONE",
             "sandbox_provider": "HOST_OR_EXTERNAL",
             "latest_observation": None,
@@ -49,7 +51,7 @@ class StrawberryCore:
                 "effects": len(observation.effects),
             }
         return {
-            "strawberryme": "0.4.0",
+            "strawberryme": __version__,
             "root": str(self.root),
             "source": architecture.source.to_dict(),
             "language_support": {"python": "ACTIVE", "javascript": "PLANNED", "php": "PLANNED", "csharp": "PLANNED"},
@@ -59,7 +61,7 @@ class StrawberryCore:
             "runtime": runtime_state,
             "execution_providers": self.providers.capabilities(),
             "adaptive": {
-                "latest_probe_plan": (self.store.get_latest_probe_plan().to_dict() if self.store.get_latest_probe_plan() else None),
+                "latest_probe_plan": (latest_plan.to_dict() if latest_plan else None),
                 "principle": "start small; follow evidence; expand only unresolved branches",
             },
         }
@@ -721,17 +723,21 @@ class StrawberryCore:
         return Edge(source, target, kind)  # type: ignore[arg-type]
 
     def _compile_check(self) -> dict[str, Any]:
-        result = subprocess.run(
-            ["python", "-m", "compileall", "-q", str(self.root)],
-            cwd=self.root,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        errors: list[dict[str, str]] = []
+        checked = 0
+        for file in sorted(self.root.rglob("*.py")):
+            rel = file.relative_to(self.root).as_posix()
+            if self.config.excluded(rel):
+                continue
+            checked += 1
+            try:
+                source = file.read_text(encoding="utf-8")
+                compile(source, str(file), "exec")
+            except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+                errors.append({"path": rel, "error": str(exc)})
         return {
-            "status": "PASS" if result.returncode == 0 else "FAIL",
-            "exit_code": result.returncode,
-            "stdout": result.stdout[-4000:],
-            "stderr": result.stderr[-4000:],
+            "status": "PASS" if not errors else "FAIL",
+            "checked_files": checked,
+            "errors": errors[:100],
         }
+
