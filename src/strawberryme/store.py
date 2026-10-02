@@ -4,7 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from .models import Delta
+from .models import Delta, RuntimeObservation
 
 
 class Store:
@@ -46,3 +46,12 @@ class Store:
         if not isinstance(raw, dict):
             return None
         return Delta(tuple(raw.get("add", [])), tuple(raw.get("remove", [])))
+
+    def set_runtime_observation(self, observation: RuntimeObservation) -> None:
+        self.set_json("runtime_observation", observation.to_dict())
+
+    def get_runtime_observation(self) -> RuntimeObservation | None:
+        raw = self.get_json("runtime_observation")
+        if not isinstance(raw, dict):
+            return None
+        return RuntimeObservation.from_dict(raw)
