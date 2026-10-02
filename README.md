@@ -1,18 +1,18 @@
 # StrawberryMe
 
 <p align="center">
-  <img src="docs/strawberryme-banner.png" alt="StrawberryMe — adaptive architecture orientation and runtime evidence for software-engineering agents" width="100%">
+  <img src="docs/strawberryme-banner.png" alt="StrawberryMe — persistent architecture orientation and evidence-bound verification for software-engineering agents" width="100%">
 </p>
 
 <p align="center">
-  <strong>Adaptive architecture orientation for software-engineering agents.</strong><br>
-  Start small. Follow evidence. Expand only where uncertainty remains.
+  <strong>Persistent architecture orientation and evidence-bound verification for software-engineering agents.</strong><br>
+  Start small. Follow evidence. Expand only uncertainty.
 </p>
 
 <p align="center">
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue">
   <img alt="Status" src="https://img.shields.io/badge/status-experimental-orange">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.3.0-red">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.4.0-red">
   <img alt="Python" src="https://img.shields.io/badge/python-%3E%3D3.11-3776AB">
   <img alt="MCP" src="https://img.shields.io/badge/MCP-v2-5b5bd6">
   <img alt="Agent Skill" src="https://img.shields.io/badge/agent-skill-purple">
@@ -23,237 +23,293 @@
 
 ## What StrawberryMe is
 
-StrawberryMe is a **persistent architecture-orientation and evidence interface for coding agents**.
-
-Coding agents are usually capable of implementing local code. The harder problem is preserving a trustworthy model of the surrounding system across long sessions, context compression, handoffs and dynamic runtime behavior.
-
-StrawberryMe keeps three views separate:
+StrawberryMe is a deterministic architecture-orientation and verification layer for coding agents. It externalizes information that agents frequently lose across long sessions, context compaction and handoffs:
 
 ```text
-DECLARED
-what the project says should be allowed
-
-STATIC
-what the source projection currently shows
-
-OBSERVED
-what happened in a concrete execution
+Where am I?
+What comes in and what goes out?
+What depends on this area?
+Which boundaries matter?
+What structural change was intended?
+What did the source show?
+What did this execution actually do?
+What changed since the previous verification?
 ```
 
-v0.3 adds a fourth dimension: **adaptive depth**. StrawberryMe no longer assumes that every change needs the same amount of analysis.
+StrawberryMe is not a coding agent, planner, deployment authority, security sandbox or built-in LLM.
 
-> **Agents reason. StrawberryMe decides how much architecture evidence is needed from concrete signals.**
-
-It is not a coding agent, planner, long-term task manager, deployment authority or built-in LLM.
+> **Agents reason. StrawberryMe preserves architecture orientation and binds claims to inspectable evidence.**
 
 ---
 
-# v0.3.0 — Adaptive Evidence
+# v0.4.0 — Provider-aware persistent architecture evidence
 
-The v0.3 operating principle is deliberately small:
+v0.4 deepens the v0.3 adaptive loop instead of adding more languages or autonomous behavior.
 
 ```text
 CHANGE SIGNALS
       ↓
-RISK REASONS
+ADAPTIVE CURSOR
       ↓
-SMALLEST USEFUL CHECK
+MINIMAL PROBE PLAN
       ↓
-OBSERVE
+EXECUTION ENVELOPE
       ↓
-EVIDENCE SUFFICIENT?
-  ┌───────┴────────┐
- yes               no
-  │                 │
-VERIFY       EXPAND ONLY THE
-             UNCERTAIN BRANCH
+PROVIDER CAPABILITY CHECK
+      ↓
+SOURCE-BOUND EXECUTION
+      ↓
+OBSERVED MAP
+      ↓
+VERIFY
+      ↓
+EVIDENCE HISTORY + ARCHITECTURE DIFF
 ```
 
-A documentation-only change should not trigger runtime probing. A change that touches an architectural boundary may need a bounded cursor and static verification. A change that introduces dynamic imports, runtime dispatch, plugins, process/network behavior or incomplete static evidence can escalate to a runtime probe.
-
-There is no synthetic numeric confidence score. StrawberryMe returns concrete reasons such as:
+The important distinction is now explicit:
 
 ```text
-ARCHITECTURE_BOUNDARY_TOUCHED
-DYNAMIC_BEHAVIOR_SIGNAL
-STATIC_MAP_INCOMPLETE
-EXPECTED_DELTA_ACTIVE
-RUNTIME_ONLY_EDGE_PREVIOUSLY_OBSERVED
+Execution Envelope
+≠
+OS Security Sandbox
 ```
+
+The envelope describes what a probe is allowed to require. The execution provider declares what it can actually enforce. StrawberryMe refuses a plan when the requested enforcement is stronger than the selected provider can provide.
 
 ---
 
-## What StrawberryMe v0.3.0 can do today
+## What v0.4 adds
 
-| Capability | v0.3.0 behavior |
+| Capability | v0.4 behavior |
 |---|---|
-| Source identity | Binds plans and observations to Git/source snapshot identity. |
-| Current MAP | Python AST projection of modules, symbols and static dependencies. |
-| Adaptive MAP Cursor | Chooses a small cursor horizon from concrete change signals instead of always expanding the graph. |
-| I/O orientation | Exposes function inputs and outputs from Python annotations. |
-| Architecture boundaries | Evaluates declared path boundaries and forbidden dependency rules. |
-| Future Delta | Records intended static edge additions/removals. |
-| Change assessment | Classifies a supplied or dirty-file change scope as LOW, MEDIUM or HIGH with explicit reason codes. |
-| Minimal probe planning | Builds the smallest runtime case needed for the current uncertainty. |
-| Execution Envelope | Freezes executable class, source snapshot, filesystem policy, network policy, process policy, named environment access and resource limits. |
-| Envelope enforcement | Python runtime probing can block disallowed project writes, network connects and process spawning. |
-| Approval gate | Capability-expanding plans remain pending until explicitly approved outside the normal MCP run path. |
-| Observed MAP | Captures project-internal Python runtime call edges. |
-| Runtime effects | Captures selected file-write, network-connect and process-spawn effects. |
-| Runtime-only edges | Shows observed relationships absent from the static projection. |
-| Adaptive follow-up | Stops after decisive evidence or recommends expansion only around unresolved runtime-only branches. |
-| Stale-plan refusal | A probe plan cannot run after its bound source snapshot changes. |
-| Stale-evidence refusal | Runtime evidence is not silently reused after source changes. |
-| Claude Code adapter | Session, compaction, edit and stop lifecycle hooks can surface orientation or enforce deterministic completion checks. |
-| Harness-neutral core | MCP/CLI/core remain usable without Claude Code or any specific agent provider. |
+| Execution Provider Contract | Providers declare filesystem, network and process enforcement strength plus instrumentation capability. |
+| Fail-closed provider selection | A plan requiring `OS_ISOLATED` enforcement is rejected by the local Python provider instead of pretending Python audit hooks are a sandbox. |
+| Local Python provider | Current built-in provider uses a normal local subprocess plus Python profile/audit instrumentation. Enforcement is explicitly `PYTHON_AUDIT`; OS isolation is `NONE`. |
+| Better Python call resolution | Import aliases, imported symbols and relative imports are resolved before falling back to conservative short-name matching. |
+| AST-based dynamic signals | Dynamic import, reflection, process creation, network clients, plugin entrypoints and configuration access are detected from syntax trees rather than source substrings. |
+| Incremental MAP cache | Per-file parser results are cached in SQLite and unchanged files are reused instead of reparsing the repository on every MAP request. |
+| Scan telemetry | `parsed_files`, `reused_files`, `cache_hit_ratio` and parser version are exposed. |
+| Runtime evidence history | Runtime observations are retained as bounded source-bound records rather than only replacing the previous observation. |
+| Verification history | Each verification records static edges, violations and relevant runtime evidence references. |
+| Architecture diff | StrawberryMe can report added/removed static edges and newly introduced/resolved violations between the latest verification states. |
+| Adaptive evidence loop | v0.3 behavior remains: risk is signal-driven, probes stay minimal, runtime-only branches are expanded selectively, and capability expansion requires a new plan. |
+| Claude Code lifecycle adapter | SessionStart, PreCompact, PreToolUse and Stop hooks remain available as an optional harness adapter. |
+
+Multi-language support remains intentionally deferred until this Python path is empirically useful.
 
 ---
 
-## Adaptive verification paths
+## Truth model
 
-### Low signal
-
-Example: README-only change.
+StrawberryMe keeps three architecture views separate:
 
 ```text
-ASSESS
-risk: LOW
-reason: NON_CODE_ONLY
+DECLARED
+project rules + intended delta
 
-recommended:
-STATIC_ONLY
+STATIC
+source-derived Current MAP
+
+OBSERVED
+relationships/effects seen in a concrete source-bound execution
 ```
 
-No runtime probe is needed.
-
-### Medium signal
-
-Example: code inside a declared application boundary changes but no dynamic behavior is visible.
+A result should never silently collapse these into one truth claim.
 
 ```text
-ASSESS
-risk: MEDIUM
-reason: ARCHITECTURE_BOUNDARY_TOUCHED
-
-recommended:
-CURSOR_THEN_VERIFY
+BUILD PASS != ARCHITECTURE PASS
+STATIC PASS != RUNTIME PASS
+OBSERVED ON ONE TRACE != WHOLE-PROGRAM PROOF
 ```
 
-### High signal
+---
+
+## Execution providers
+
+v0.4 introduces a provider contract instead of embedding container technology into the core.
+
+The built-in provider currently declares approximately:
+
+```text
+provider_id: local-python
+runtime: LOCAL_SUBPROCESS
+filesystem_enforcement: PYTHON_AUDIT
+network_enforcement: PYTHON_AUDIT
+process_enforcement: PYTHON_AUDIT
+python_instrumentation: true
+arbitrary_command: false
+```
+
+An execution envelope can require one of:
+
+```text
+NONE
+PYTHON_AUDIT
+HOST_MANAGED
+OS_ISOLATED
+```
 
 Example:
 
-```python
-module = importlib.import_module(configured_adapter)
-handler = getattr(module, configured_handler)
+```text
+required_enforcement: OS_ISOLATED
+provider: local-python
+
+→ PROVIDER_CAPABILITY_INSUFFICIENT
 ```
 
-StrawberryMe can report:
+That failure is intentional. Python audit/profile hooks can improve observation and enforce policy inside cooperating Python execution, but they are not an OS security boundary.
+
+Future providers can implement the same contract for harness-managed sandboxes, Docker/Podman or another isolation technology without changing StrawberryMe architecture semantics.
+
+---
+
+## Static MAP improvements
+
+v0.4 still uses the standard-library Python AST, but call resolution is less naive.
+
+These forms can now be resolved deterministically when the referenced project symbol exists:
+
+```python
+from app.worker import work as run_work
+run_work()
+```
+
+```python
+import app.worker as worker
+worker.work()
+```
+
+```python
+from .worker import work
+work()
+```
+
+Short-name matching remains only a conservative fallback.
+
+---
+
+## Dynamic signals are structural
+
+Adaptive risk no longer relies on comments or raw source substring matching. Signals are derived from AST nodes.
+
+Examples include:
 
 ```text
-risk: HIGH
+DYNAMIC_IMPORT
+REFLECTIVE_ACCESS
+PROCESS_CREATION
+NETWORK_CLIENT
+PLUGIN_ENTRYPOINT
+CONFIG_ACCESS
+```
+
+A comment containing `importlib.import_module(...)` therefore does not create a dynamic-import signal.
+
+Assessment remains deterministic and explanatory:
+
+```text
+RISK HIGH
 reasons:
 - DYNAMIC_BEHAVIOR_SIGNAL
 - ARCHITECTURE_BOUNDARY_TOUCHED
-
-recommended:
-MINIMAL_RUNTIME_PROBE
+signals:
+- DYNAMIC_IMPORT app/payment.py:81
 ```
 
-The risk label is not a probability. It is a deterministic routing state derived from observable signals.
+There is deliberately no invented numerical confidence score.
 
 ---
 
-## Execution Envelope
+## Incremental MAP
 
-A v0.3 probe is no longer just an arbitrary command. `strawberry_probe_plan` creates a frozen plan with an execution envelope.
-
-Example:
+The MAP remains derived rather than canonical, but StrawberryMe no longer needs to reparse every unchanged Python file on every request.
 
 ```text
-EXECUTION ENVELOPE
-
-source_snapshot: S17
-allowed_executables:
-  - python
-filesystem: TEMP_WRITE
-network: DENY
-process_spawn: DENY
-allowed_env_names: []
-max_cases: 3
-max_repeats: 3
-max_runtime_seconds: 60
+repository
+   ↓
+file metadata + parser version
+   ↓
+changed file? ── no ─→ reuse cached parser payload
+      │
+     yes
+      ↓
+parse only this file
+      ↓
+recompose project graph
 ```
 
-The envelope is validated before execution and source-bound.
-
-If the source changes:
+`strawberry_status` exposes scan statistics such as:
 
 ```text
-PLAN S17
-source becomes S18
-      ↓
-STALE_PLAN
+files: 420
+parsed_files: 2
+reused_files: 418
+cache_hit_ratio: 0.9952
 ```
 
-If observed behavior exceeds the envelope:
-
-```text
-probe attempts project write
-filesystem = TEMP_WRITE
-      ↓
-blocked
-      ↓
-ENVELOPE_EXCEEDED
-      ↓
-NEW_PLAN_REQUIRED
-```
-
-The Python probe can currently enforce selected filesystem, network and process-spawn limits. This is still **not a general-purpose OS security sandbox**. Native code, non-Python child environments and host-level isolation remain the responsibility of the harness or an external sandbox.
+The cache is an optimization. The source repository remains authoritative.
 
 ---
 
-## Adaptive expansion
+## Evidence history and architecture diff
 
-StrawberryMe does not automatically fan out into an exhaustive probe matrix.
+Runtime evidence is stored as history in `.strawberry/strawberry.db` and remains source-bound.
 
-After a run it chooses a bounded next action:
+Verification also records a compact structural state. `strawberry_history` can compare the latest verification records:
 
 ```text
-ENVELOPE_EXCEEDED
-→ NEW_PLAN_REQUIRED
+from snapshot S17
+to snapshot S18
 
-architecture violation observed
-→ VERIFY_AND_REPORT
+ADDED STATIC EDGE
+PaymentService → PaymentPort
 
-runtime-only relationship remains unexplained
+REMOVED STATIC EDGE
+PaymentService → LegacyPaymentService
+
+NEW VIOLATION
+application → database
+```
+
+This is intended to answer not only “what is true now?” but also “what structurally changed since the previous verified state?”
+
+History is evidence, not repository truth, and stale observations remain stale after source changes.
+
+---
+
+## Adaptive operating model
+
+v0.4 preserves the v0.3 principle:
+
+```text
+ASSESS
+  ↓
+LOW     → static-only path
+MEDIUM  → bounded cursor + verify
+HIGH    → minimal runtime probe
+```
+
+A probe begins with the smallest useful case. StrawberryMe then reacts to evidence:
+
+```text
+no unresolved runtime branch
+→ VERIFY
+
+runtime-only relationship
 → EXPAND_UNCERTAIN_BRANCH
 
-runtime coverage missing
+concrete violation
+→ VERIFY_AND_REPORT
+
+envelope breach
+→ NEW_PLAN_REQUIRED
+
+insufficient trace
 → REFINE_PROBE
-
-no unresolved branch
-→ VERIFY
 ```
 
-Example:
-
-```text
-P1
-PaymentService → PluginLoader
-PluginLoader → RuntimeAdapter
-
-runtime-only:
-RuntimeAdapter → LegacyDB
-```
-
-The next recommendation is not “scan everything”. It is:
-
-```text
-EXPAND_UNCERTAIN_BRANCH
-TARGET
-module:...RuntimeAdapter
-```
+Expansion outside the frozen envelope is never silently authorized.
 
 ---
 
@@ -261,22 +317,21 @@ module:...RuntimeAdapter
 
 ```text
 strawberry_status()
-
-strawberry_assess(paths=[], target=None)
-
+strawberry_assess(paths=None, target=None)
 strawberry_cursor(target, horizon=1, adaptive=False)
-
 strawberry_preflight(add=[], remove=[])
 
 strawberry_probe_plan(
     command,
     target=None,
-    paths=[],
+    paths=None,
     expected_runtime_edges=[],
     forbidden_runtime_edges=[],
     filesystem="TEMP_WRITE",
     network="DENY",
     process_spawn="DENY",
+    required_enforcement="PYTHON_AUDIT",
+    provider_id="local-python",
     allowed_env_names=[],
     max_cases=3,
     max_repeats=3,
@@ -284,214 +339,159 @@ strawberry_probe_plan(
 )
 
 strawberry_probe_run(plan_id)
-
-strawberry_verify()
+strawberry_history(limit=10)
+strawberry_verify(command=None, timeout_seconds=30)
 ```
 
-`strawberry_observe(...)` remains as a low-level v0.2-compatible operation. New agent integrations should prefer `probe_plan → probe_run`.
-
-The MCP surface intentionally does **not** expose an approval tool. Capability-expanding approval is expected to come from a user/harness-controlled path. The bundled CLI provides a local approval command; it records a policy signal, not cryptographic proof of human identity.
+`strawberry_observe(...)` remains available as a low-level compatibility API. New adaptive integrations should prefer `probe_plan → probe_run`.
 
 ---
 
-## CLI example
+## Agent Skill
 
-Assess a change:
+The canonical operating procedure is in `SKILL.md`; `skill/SKILL.md` is kept as a compatibility copy.
 
-```bash
-strawberry --root . assess --path app/application/payment.py
-```
+The key rule is not “always run everything.” It is:
 
-Use an adaptive cursor:
+> **Use the smallest verification path supported by current evidence and expand only where uncertainty remains.**
 
-```bash
-strawberry --root . cursor PaymentService --adaptive
-```
-
-Create a safe local probe plan:
-
-```bash
-strawberry --root . probe-plan \
-  --path app/application/payment.py \
-  -- python -m pytest tests/test_payment.py -q
-```
-
-Run the returned plan:
-
-```bash
-strawberry --root . probe-run <plan-id>
-```
-
-A capability-expanding plan, for example with network enabled, returns `APPROVAL_REQUIRED`:
-
-```bash
-strawberry --root . probe-plan \
-  --network ALLOW \
-  --env PAYMENT_API_KEY \
-  -- python scripts/live_probe.py
-```
-
-Local approval is explicit:
-
-```bash
-strawberry --root . probe-approve <plan-id> --by operator
-strawberry --root . probe-run <plan-id>
-```
-
-Environment variable **names** may be declared; StrawberryMe does not intentionally persist their values.
+The Skill does not substitute for provider capability checks. If a harness does not expose strong isolation, StrawberryMe must not infer it.
 
 ---
 
-## Claude Code lifecycle adapter
+## Claude Code adapter
 
-v0.3 includes a thin optional adapter under:
-
-```text
-integrations/claude-code/hooks/hooks.json
-```
-
-It uses deterministic command hooks rather than another LLM layer:
+`integrations/claude-code/hooks/hooks.json` provides an optional lifecycle adapter:
 
 ```text
 SessionStart
 → restore compact StrawberryMe orientation
 
 PreCompact
-→ re-surface architecture state before context compression
+→ refresh critical architecture context before context compaction
 
-PreToolUse Write|Edit
-→ assess the touched file; stay quiet for LOW signal
+PreToolUse Write/Edit
+→ surface material change signals without blocking low-risk edits
 
 Stop
-→ run deterministic StrawberryMe completion checks
+→ reject completion only when current StrawberryMe evidence contains a blocking failure
 ```
 
-The Stop hook blocks only on concrete current evidence such as build failure, hard static boundary failure, incomplete expected delta or violated runtime evidence. Missing optional runtime evidence by itself is not converted into a failure.
-
-The core does not depend on Claude Code. Other harnesses can integrate the same MCP/CLI semantics through their own lifecycle mechanisms.
+The core remains harness-neutral. Hooks are adapters, not the architecture.
 
 ---
 
-## Agent Skill
+## CLI examples
 
-The Skill describes the control loop, but v0.3 moves important guarantees into code:
-
-```text
-ASSESS
-      ↓
-ADAPTIVE CURSOR when useful
-      ↓
-PREFLIGHT when architecture is intended to move
-      ↓
-IMPLEMENT
-      ↓
-PLAN minimal runtime evidence only when needed
-      ↓
-RUN inside frozen envelope
-      ↓
-FOLLOW evidence, not a fixed checklist
-      ↓
-VERIFY
+```bash
+strawberry --root . status
+strawberry --root . assess --path app/payment.py
+strawberry --root . cursor PaymentService --adaptive
 ```
 
-Key rules:
+Create a local Python-audit probe:
 
-- `BUILD PASS` does not imply `ARCHITECTURE PASS`.
-- `STATIC PASS` does not imply `RUNTIME PASS`.
-- A single runtime trace does not imply whole-program coverage.
-- Unknown evidence remains unknown.
-- Runtime evidence is source-bound.
-- Probe plans are source-bound.
-- Capability expansion requires a new/approved envelope.
-- Do not broaden context or runtime probes when current evidence is already decisive.
+```bash
+strawberry --root . probe-plan \
+  --required-enforcement PYTHON_AUDIT \
+  --provider local-python \
+  --path app/payment.py \
+  -- python -m pytest tests/test_payment.py -q
+```
+
+A plan demanding OS-level isolation will fail on the built-in provider:
+
+```bash
+strawberry --root . probe-plan \
+  --required-enforcement OS_ISOLATED \
+  -- python -m pytest tests/test_payment.py -q
+```
+
+Inspect structural history:
+
+```bash
+strawberry --root . history --limit 10
+```
 
 ---
 
-## Architecture example
+## Execution-envelope semantics
 
-Declared rule:
-
-```text
-application !→ database
-```
-
-Static source:
+The built-in Python provider can observe and attempt to block selected Python-level effects such as:
 
 ```text
-PaymentService → PaymentPort
-STATIC PASS
+FILE_WRITE
+NETWORK_CONNECT
+PROCESS_SPAWN
 ```
 
-Runtime:
+Its enforcement label is `PYTHON_AUDIT`, not `OS_ISOLATED`.
 
-```text
-PaymentService → PluginLoader
-PluginLoader → LegacyAdapter
-LegacyAdapter → Database
-```
-
-StrawberryMe can distinguish:
-
-```text
-STATIC
-PASS
-
-OBSERVED
-runtime-only relationship present
-
-DECLARED
-application !→ database
-
-RESULT
-VIOLATED_ON_TRACE
-```
-
-If the runtime path instead reveals a new but non-forbidden adapter relationship, StrawberryMe can return `EXPAND_UNCERTAIN_BRANCH` rather than declaring failure or recursively scanning the whole system.
+Native code, direct syscalls, alternate runtimes, inherited descriptors and host-level escape resistance are outside this provider's security guarantees. Stronger claims require a provider that explicitly advertises stronger enforcement.
 
 ---
 
-## What v0.3 does not claim
+## Persistence
 
-StrawberryMe does not claim that:
+SQLite under `.strawberry/` stores only derived StrawberryMe state, including:
 
-- static analysis reconstructs a complete runtime architecture;
-- one trace covers every execution path;
-- the execution envelope is equivalent to a hardened container or VM sandbox;
-- risk states are statistical probabilities;
-- a passing probe proves general program correctness;
-- the Current or Observed MAP is canonical truth;
-- every DI container, native extension, generated dependency, SQL relation or external-service semantic is visible.
+```text
+Future Delta
+probe plans / approvals
+per-file parser cache
+latest runtime observation
+runtime evidence history
+verification history
+```
 
-The goal is bounded, inspectable evidence rather than false certainty.
+Deleting `.strawberry/` removes this derived state; it does not modify repository source.
 
 ---
 
-## v0.3 acceptance gates
+## Current limitations
 
-The v0.3 hypothesis should be tested against at least these gates:
+- Python source MAP and runtime instrumentation only.
+- Runtime profiling observes executed Python paths, not all possible paths.
+- The built-in provider is not an OS sandbox.
+- Static resolution is improved but is not full type/data-flow analysis.
+- Dependency injection, generated code, native extensions and external-service semantics can remain unresolved.
+- Incremental caching avoids repeated parsing but still recomposes the project graph from cached per-file payloads.
+- No daemon and no background watcher.
+- No built-in LLM.
+
+Unknown evidence remains unknown.
+
+---
+
+## Evaluation target
+
+The next meaningful proof is empirical rather than architectural.
+
+Use the same tasks and repositories across:
 
 ```text
-G1  LOW changes avoid unnecessary runtime work.
-G2  dynamic/boundary signals escalate to a minimal probe.
-G3  a source change invalidates an existing plan.
-G4  the execution envelope blocks a seeded forbidden capability.
-G5  a runtime-only architecture edge is surfaced.
-G6  follow-up expands only the unresolved branch.
-G7  a completion hook blocks a concrete architecture failure.
+A  coding agent only
+B  agent + StrawberryMe static orientation
+C  agent + StrawberryMe adaptive + observed evidence
 ```
 
-A useful A/B/C evaluation remains:
+Measure at least:
 
 ```text
-A  coding agent without StrawberryMe
-B  agent + static StrawberryMe orientation
-C  agent + adaptive StrawberryMe evidence loop
+forbidden dependency introduction
+missed consumers
+runtime-only dependency detection
+false completion claims
+unnecessary probes
+token usage
+tool calls
+elapsed time
 ```
 
-Measure boundary violations, missed dynamic dependencies, false completion claims, token/tool-call cost and unnecessary probe executions.
+StrawberryMe should expand further only if B/C materially improve architecture outcomes relative to their cost.
 
 ---
 
 ## License
 
-StrawberryMe is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See [LICENSE](LICENSE).
+StrawberryMe is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE).

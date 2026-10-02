@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import Any
 
 from .config import Config
 from .models import ArchitectureMap, Edge, Node
+from .signals import detect_dynamic_signals
 from .source import source_identity
+
+PARSER_VERSION = "py-ast-v2"
 
 
 def _annotation(node: ast.AST | None) -> str:
@@ -25,117 +29,187 @@ def _module_name(root: Path, file: Path) -> str:
     return ".".join(parts)
 
 
-def _resolve_import_target(module: str, imported: str, known_modules: set[str]) -> str | None:
-    candidates = [imported, imported.split(".")[0]]
-    for candidate in candidates:
-        for known in known_modules:
-            if known == candidate or known.startswith(candidate + ".") or candidate.startswith(known + "."):
-                return f"module:{known}"
+def _resolve_module(imported: str, known_modules: set[str]) -> str | None:
+    if imported in known_modules:
+        return imported
+    matches = [m for m in known_modules if m.startswith(imported + ".") or imported.startswith(m + ".")]
+    if not matches:
+        return None
+    return sorted(matches, key=len, reverse=True)[0]
+
+
+def _dotted(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
     return None
 
 
-def _call_name(node: ast.Call) -> str | None:
-    fn = node.func
-    if isinstance(fn, ast.Name):
-        return fn.id
-    if isinstance(fn, ast.Attribute):
-        parts: list[str] = []
-        cur: ast.AST = fn
-        while isinstance(cur, ast.Attribute):
-            parts.append(cur.attr)
-            cur = cur.value
-        if isinstance(cur, ast.Name):
-            parts.append(cur.id)
-            return ".".join(reversed(parts))
-    return None
+def _parse_file(root: Path, file: Path, config: Config) -> dict[str, Any]:
+    rel = file.relative_to(root).as_posix()
+    module = _module_name(root, file)
+    boundary = config.boundary_for(rel)
+    payload: dict[str, Any] = {
+        "path": rel, "module": module, "boundary": boundary,
+        "nodes": [], "imports": [], "calls": [], "signals": [], "parse_error": None,
+    }
+    module_id = f"module:{module or rel}"
+    payload["nodes"].append(Node(module_id, "module", rel, module or rel, module or rel, boundary).to_dict())
+    try:
+        tree = ast.parse(file.read_text(encoding="utf-8"), filename=rel)
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        payload["parse_error"] = str(exc)
+        return payload
+
+    aliases: dict[str, str] = {}
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack: list[str] = []
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            qual = ".".join([module, *self.stack, node.name]).strip(".")
+            payload["nodes"].append(Node(f"symbol:{qual}", "class", rel, node.name, qual, boundary).to_dict())
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def _function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            qual = ".".join([module, *self.stack, node.name]).strip(".")
+            inputs = tuple(
+                f"{arg.arg}:{_annotation(arg.annotation)}"
+                for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+                if arg.arg not in {"self", "cls"}
+            )
+            output = _annotation(node.returns)
+            outputs = () if output in {"None", "unknown"} else (output,)
+            payload["nodes"].append(Node(f"symbol:{qual}", "function", rel, node.name, qual, boundary, inputs, outputs).to_dict())
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = _function
+        visit_AsyncFunctionDef = _function
+
+    Visitor().visit(tree)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".")[0]
+                aliases[local] = alias.name if alias.asname else alias.name.split(".")[0]
+                payload["imports"].append({"module": alias.name, "line": getattr(node, "lineno", 0)})
+        elif isinstance(node, ast.ImportFrom):
+            package = module if file.stem == "__init__" else module.rsplit(".", 1)[0] if "." in module else ""
+            if node.level:
+                parts = package.split(".") if package else []
+                climb = max(0, node.level - 1)
+                if climb:
+                    parts = parts[:-climb] if climb <= len(parts) else []
+                base = ".".join([*parts, node.module] if node.module else parts)
+            else:
+                base = node.module or ""
+            if base:
+                payload["imports"].append({"module": base, "line": getattr(node, "lineno", 0)})
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                local = alias.asname or alias.name
+                aliases[local] = ".".join(part for part in (base, alias.name) if part)
+        elif isinstance(node, ast.Call):
+            dotted = _dotted(node.func)
+            if dotted:
+                head, *tail = dotted.split(".")
+                resolved = aliases.get(head)
+                if resolved:
+                    dotted = ".".join([resolved, *tail]) if tail else resolved
+                payload["calls"].append({"name": dotted, "line": getattr(node, "lineno", 0)})
+    payload["signals"] = detect_dynamic_signals(tree, rel)
+    return payload
 
 
-def scan_python(root: Path, config: Config) -> ArchitectureMap:
+def scan_python(root: Path, config: Config, store: Any | None = None) -> ArchitectureMap:
     root = root.resolve()
-    py_files: list[Path] = []
-    for file in root.rglob("*.py"):
-        rel = file.relative_to(root).as_posix()
-        if not config.excluded(rel):
-            py_files.append(file)
-
+    py_files = [f for f in root.rglob("*.py") if not config.excluded(f.relative_to(root).as_posix())]
     module_by_file = {f: _module_name(root, f) for f in py_files}
     known_modules = {m for m in module_by_file.values() if m}
     result = ArchitectureMap(source=source_identity(root), rules=config.rules)
-    symbols_by_short_name: dict[str, list[str]] = {}
-    trees: dict[Path, ast.AST] = {}
+    payloads: list[dict[str, Any]] = []
+    reused = parsed = 0
+
+    current_paths = {f.relative_to(root).as_posix() for f in py_files}
+    if store is not None:
+        store.prune_file_cache(current_paths, PARSER_VERSION)
 
     for file in py_files:
         rel = file.relative_to(root).as_posix()
-        module = module_by_file[file]
-        boundary = config.boundary_for(rel)
-        module_id = f"module:{module or rel}"
-        result.nodes.append(Node(module_id, "module", rel, module or rel, module or rel, boundary))
-        try:
-            tree = ast.parse(file.read_text(encoding="utf-8"), filename=rel)
-            trees[file] = tree
-        except (SyntaxError, UnicodeDecodeError) as exc:
-            result.parse_errors.append({"path": rel, "error": str(exc)})
-            continue
+        stat = file.stat()
+        cached = store.get_file_cache(rel, PARSER_VERSION, stat.st_mtime_ns, stat.st_size) if store is not None else None
+        if isinstance(cached, dict):
+            payload = cached
+            reused += 1
+        else:
+            payload = _parse_file(root, file, config)
+            parsed += 1
+            if store is not None:
+                store.set_file_cache(rel, PARSER_VERSION, stat.st_mtime_ns, stat.st_size, payload)
+        payloads.append(payload)
 
-        class StackVisitor(ast.NodeVisitor):
-            def __init__(self) -> None:
-                self.stack: list[str] = []
+    nodes: list[Node] = []
+    symbols_by_qual: dict[str, str] = {}
+    symbols_by_short: dict[str, list[str]] = {}
+    module_node_by_name: dict[str, str] = {}
+    for payload in payloads:
+        for raw in payload.get("nodes", []):
+            node = Node.from_dict(raw)
+            nodes.append(node)
+            if node.kind == "module":
+                module_node_by_name[node.qualname] = node.id
+            else:
+                symbols_by_qual[node.qualname] = node.id
+                symbols_by_short.setdefault(node.name, []).append(node.id)
+        result.dynamic_signals.extend(payload.get("signals", []))
+        if payload.get("parse_error"):
+            result.parse_errors.append({"path": payload["path"], "error": payload["parse_error"]})
 
-            def visit_ClassDef(self, node: ast.ClassDef) -> None:
-                qual = ".".join([module, *self.stack, node.name]).strip(".")
-                node_id = f"symbol:{qual}"
-                result.nodes.append(Node(node_id, "class", rel, node.name, qual, boundary))
-                symbols_by_short_name.setdefault(node.name, []).append(node_id)
-                self.stack.append(node.name)
-                self.generic_visit(node)
-                self.stack.pop()
+    edges: dict[str, Edge] = {}
+    for payload in payloads:
+        module = payload["module"]
+        source_id = f"module:{module or payload['path']}"
+        rel = payload["path"]
+        for item in payload.get("imports", []):
+            target_module = _resolve_module(str(item["module"]), known_modules)
+            if target_module and target_module != module:
+                edge = Edge(source_id, f"module:{target_module}", "IMPORT", evidence=f"{rel}:{item['line']}")
+                edges[edge.key] = edge
+        for item in payload.get("calls", []):
+            name = str(item["name"])
+            target: str | None = None
+            if name in symbols_by_qual:
+                target = symbols_by_qual[name]
+            else:
+                pieces = name.split(".")
+                for i in range(len(pieces), 0, -1):
+                    candidate_module = ".".join(pieces[:i-1])
+                    candidate_symbol = ".".join(pieces[:i])
+                    if candidate_symbol in symbols_by_qual:
+                        target = symbols_by_qual[candidate_symbol]
+                        break
+                    if candidate_module in module_node_by_name and pieces[-1] in symbols_by_short and len(symbols_by_short[pieces[-1]]) == 1:
+                        target = symbols_by_short[pieces[-1]][0]
+                        break
+                if target is None and len(symbols_by_short.get(pieces[-1], [])) == 1:
+                    target = symbols_by_short[pieces[-1]][0]
+            if target and target != source_id:
+                edge = Edge(source_id, target, "CALL", evidence=f"{rel}:{item['line']}")
+                edges[edge.key] = edge
 
-            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-                qual = ".".join([module, *self.stack, node.name]).strip(".")
-                node_id = f"symbol:{qual}"
-                inputs = tuple(
-                    f"{arg.arg}:{_annotation(arg.annotation)}"
-                    for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
-                    if arg.arg not in {"self", "cls"}
-                )
-                output = _annotation(node.returns)
-                outputs = () if output in {"None", "unknown"} else (output,)
-                result.nodes.append(Node(node_id, "function", rel, node.name, qual, boundary, inputs, outputs))
-                symbols_by_short_name.setdefault(node.name, []).append(node_id)
-                self.stack.append(node.name)
-                self.generic_visit(node)
-                self.stack.pop()
-
-            visit_AsyncFunctionDef = visit_FunctionDef
-
-        StackVisitor().visit(tree)
-
-    for file, tree in trees.items():
-        rel = file.relative_to(root).as_posix()
-        module = module_by_file[file]
-        module_id = f"module:{module or rel}"
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    target = _resolve_import_target(module, alias.name, known_modules)
-                    if target and target != module_id:
-                        result.edges.append(Edge(module_id, target, "IMPORT", evidence=f"{rel}:{getattr(node, 'lineno', 0)}"))
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                target = _resolve_import_target(module, node.module, known_modules)
-                if target and target != module_id:
-                    result.edges.append(Edge(module_id, target, "IMPORT", evidence=f"{rel}:{getattr(node, 'lineno', 0)}"))
-            elif isinstance(node, ast.Call):
-                name = _call_name(node)
-                if not name:
-                    continue
-                short = name.split(".")[-1]
-                matches = symbols_by_short_name.get(short, [])
-                if len(matches) == 1:
-                    target = matches[0]
-                    if target != module_id:
-                        result.edges.append(Edge(module_id, target, "CALL", evidence=f"{rel}:{getattr(node, 'lineno', 0)}"))
-
-    unique_edges = {e.key: e for e in result.edges}
-    result.edges = sorted(unique_edges.values(), key=lambda e: e.key)
-    result.nodes.sort(key=lambda n: n.id)
+    result.nodes = sorted(nodes, key=lambda n: n.id)
+    result.edges = sorted(edges.values(), key=lambda e: e.key)
+    result.scan_stats = {
+        "files": len(py_files), "parsed_files": parsed, "reused_files": reused,
+        "cache_hit_ratio": round(reused / len(py_files), 4) if py_files else 1.0,
+        "parser_version": PARSER_VERSION,
+    }
     return result

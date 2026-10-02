@@ -268,3 +268,88 @@ def test_claude_stop_gate_blocks_static_violation(tmp_path: Path) -> None:
     make_project(tmp_path)
     result = stop(StrawberryCore(tmp_path))
     assert result["decision"] == "block"
+
+
+def test_provider_refuses_stronger_isolation_than_it_can_enforce(tmp_path: Path) -> None:
+    import sys
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("def run() -> int:\n    return 1\n", encoding="utf-8")
+    result = StrawberryCore(tmp_path).probe_plan(
+        [sys.executable, "-c", "from app.a import run; run()"],
+        paths=["app/a.py"],
+        required_enforcement="OS_ISOLATED",
+    )
+    assert result["status"] == "PROVIDER_CAPABILITY_INSUFFICIENT"
+    assert result["provider"]["provider_id"] == "local-python"
+    assert result["provider"]["network_enforcement"] == "PYTHON_AUDIT"
+
+
+def test_static_resolution_handles_import_aliases_and_relative_imports(tmp_path: Path) -> None:
+    (tmp_path / "app/pkg").mkdir(parents=True)
+    (tmp_path / "app/pkg/worker.py").write_text("def work() -> None:\n    return None\n", encoding="utf-8")
+    (tmp_path / "app/pkg/a.py").write_text(
+        "from .worker import work as run_work\n\ndef run() -> None:\n    run_work()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app/pkg/c.py").write_text(
+        "import app.pkg.worker as worker\n\ndef run() -> None:\n    worker.work()\n",
+        encoding="utf-8",
+    )
+    architecture = StrawberryCore(tmp_path).map()
+    keys = {edge.key for edge in architecture.edges}
+    assert "module:app.pkg.a|IMPORT|module:app.pkg.worker" in keys
+    assert "module:app.pkg.a|CALL|symbol:app.pkg.worker.work" in keys
+    assert "module:app.pkg.c|IMPORT|module:app.pkg.worker" in keys
+    assert "module:app.pkg.c|CALL|symbol:app.pkg.worker.work" in keys
+
+
+def test_dynamic_signals_are_ast_based_not_comment_substrings(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text(
+        "# importlib.import_module('fake.module')\n"
+        "import os\n\n"
+        "def run() -> str:\n"
+        "    return os.environ['MODE']\n",
+        encoding="utf-8",
+    )
+    result = StrawberryCore(tmp_path).assess_change(paths=["app/a.py"])
+    signals = {item["signal"] for item in result["dynamic_signals"]}
+    assert "CONFIG_ACCESS" in signals
+    assert "DYNAMIC_IMPORT" not in signals
+
+
+def test_incremental_map_reuses_unchanged_files(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    first = tmp_path / "app/a.py"
+    second = tmp_path / "app/b.py"
+    first.write_text("def a() -> int:\n    return 1\n", encoding="utf-8")
+    second.write_text("def b() -> int:\n    return 2\n", encoding="utf-8")
+    core = StrawberryCore(tmp_path)
+    initial = core.map()
+    assert initial.scan_stats["parsed_files"] == 2
+    cached = core.map()
+    assert cached.scan_stats["reused_files"] == 2
+    first.write_text("def a() -> int:\n    return 100\n", encoding="utf-8")
+    changed = core.map()
+    assert changed.scan_stats["parsed_files"] == 1
+    assert changed.scan_stats["reused_files"] == 1
+
+
+def test_history_reports_static_architecture_diff_between_verifications(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    source = tmp_path / "app/a.py"
+    source.write_text("def run() -> None:\n    return None\n", encoding="utf-8")
+    (tmp_path / "app/b.py").write_text("def work() -> None:\n    return None\n", encoding="utf-8")
+    core = StrawberryCore(tmp_path)
+    core.verify()
+    source.write_text(
+        "from app.b import work\n\ndef run() -> None:\n    work()\n",
+        encoding="utf-8",
+    )
+    core.verify()
+    history = core.evidence_history()
+    diff = history["verifications"]["latest_architecture_diff"]
+    assert diff is not None
+    assert "module:app.a|IMPORT|module:app.b" in diff["added_static_edges"]
+    assert "module:app.a|CALL|symbol:app.b.work" in diff["added_static_edges"]

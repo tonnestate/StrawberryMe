@@ -11,7 +11,7 @@ from typing import Any
 
 from .config import Config, load_config
 from .models import ArchitectureMap, Delta, Edge, ExecutionEnvelope, Node, ProbeCase, ProbePlan, RuntimeObservation
-from .runtime_probe import observe_python
+from .provider import ProviderRegistry
 from .scanner import scan_python
 from .store import Store
 
@@ -23,9 +23,10 @@ class StrawberryCore:
             raise FileNotFoundError(self.root)
         self.config: Config = load_config(self.root)
         self.store = Store(self.root)
+        self.providers = ProviderRegistry()
 
     def map(self) -> ArchitectureMap:
-        return scan_python(self.root, self.config)
+        return scan_python(self.root, self.config, self.store)
 
     def status(self) -> dict[str, Any]:
         architecture = self.map()
@@ -48,14 +49,15 @@ class StrawberryCore:
                 "effects": len(observation.effects),
             }
         return {
-            "strawberryme": "0.3.0",
+            "strawberryme": "0.4.0",
             "root": str(self.root),
             "source": architecture.source.to_dict(),
             "language_support": {"python": "ACTIVE", "javascript": "PLANNED", "php": "PLANNED", "csharp": "PLANNED"},
-            "map": {"nodes": len(architecture.nodes), "edges": len(architecture.edges), "parse_errors": len(architecture.parse_errors)},
+            "map": {"nodes": len(architecture.nodes), "edges": len(architecture.edges), "parse_errors": len(architecture.parse_errors), **architecture.scan_stats},
             "architecture": {"rules": len(architecture.rules), "violations": len(violations)},
             "future_delta": delta.to_dict() if delta else None,
             "runtime": runtime_state,
+            "execution_providers": self.providers.capabilities(),
             "adaptive": {
                 "latest_probe_plan": (self.store.get_latest_probe_plan().to_dict() if self.store.get_latest_probe_plan() else None),
                 "principle": "start small; follow evidence; expand only unresolved branches",
@@ -163,7 +165,14 @@ class StrawberryCore:
                 "malformed_edges": malformed,
                 "edge_format": "source|CALL|target, e.g. module:app.service|CALL|module:app.db",
             }
-        observation = observe_python(self.root, architecture.source, command, timeout_seconds, envelope=envelope)
+        effective_envelope = envelope or ExecutionEnvelope(source_snapshot=architecture.source.snapshot_id or "", allowed_executables=(Path(command[0]).name.lower(),))
+        provider = self.providers.get(effective_envelope.provider_id)
+        if provider is None:
+            return {"status": "PROVIDER_NOT_FOUND", "provider_id": effective_envelope.provider_id}
+        capability_errors = provider.validate(effective_envelope, command)
+        if capability_errors:
+            return {"status": "PROVIDER_CAPABILITY_INSUFFICIENT", "errors": capability_errors, "provider": provider.capabilities.to_dict()}
+        observation = provider.execute(self.root, architecture.source, command, timeout_seconds, effective_envelope)
         self.store.set_runtime_observation(observation)
         self.store.set_json(
             "runtime_contract",
@@ -174,36 +183,16 @@ class StrawberryCore:
     def assess_change(self, paths: list[str] | None = None, target: str | None = None) -> dict[str, Any]:
         architecture = self.map()
         selected = sorted(set(paths or architecture.source.dirty_files))
+        selected_norm = {p.replace("\\", "/") for p in selected}
         reasons: list[str] = []
-        dynamic_hits: list[dict[str, str]] = []
         boundaries: set[str] = set()
-        code_paths: list[str] = []
+        code_paths = [p for p in selected_norm if p.endswith(".py")]
+        dynamic_hits = [signal for signal in architecture.dynamic_signals if signal.get("path") in selected_norm]
 
-        patterns = {
-            "DYNAMIC_IMPORT": ("importlib", "import_module(", "__import__("),
-            "RUNTIME_DISPATCH": ("getattr(", "setattr(", "entry_points(", "plugins"),
-            "PROCESS": ("subprocess", "os.system("),
-            "NETWORK": ("socket.", "requests.", "httpx.", "aiohttp."),
-            "ENVIRONMENT": ("os.getenv(", "os.environ", "environ["),
-        }
-        for rel in selected:
-            normalized = rel.replace("\\", "/")
-            if not normalized.endswith(".py"):
-                continue
-            code_paths.append(normalized)
-            boundary = self.config.boundary_for(normalized)
+        for rel in code_paths:
+            boundary = self.config.boundary_for(rel)
             if boundary:
                 boundaries.add(boundary)
-            path = self.root / normalized
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            for code, needles in patterns.items():
-                hit = next((needle for needle in needles if needle in text), None)
-                if hit:
-                    dynamic_hits.append({"path": normalized, "signal": code, "evidence": hit})
-
         if not selected:
             reasons.append("NO_CHANGE_SCOPE")
         if selected and not code_paths:
@@ -217,31 +206,22 @@ class StrawberryCore:
         delta = self.store.get_delta()
         if delta and (delta.add or delta.remove):
             reasons.append("EXPECTED_DELTA_ACTIVE")
-
         latest = self.store.get_runtime_observation()
         if latest and self._observation_current(latest, architecture):
             static_pairs = self._static_module_pairs(architecture)
             if any((edge.source, edge.target) not in static_pairs for edge in latest.edges):
                 reasons.append("RUNTIME_ONLY_EDGE_PREVIOUSLY_OBSERVED")
-
-        if any(reason in reasons for reason in ("DYNAMIC_BEHAVIOR_SIGNAL", "STATIC_MAP_INCOMPLETE", "RUNTIME_ONLY_EDGE_PREVIOUSLY_OBSERVED")):
+        if any(r in reasons for r in ("DYNAMIC_BEHAVIOR_SIGNAL", "STATIC_MAP_INCOMPLETE", "RUNTIME_ONLY_EDGE_PREVIOUSLY_OBSERVED")):
             risk = "HIGH"
-        elif any(reason in reasons for reason in ("ARCHITECTURE_BOUNDARY_TOUCHED", "EXPECTED_DELTA_ACTIVE")):
+        elif any(r in reasons for r in ("ARCHITECTURE_BOUNDARY_TOUCHED", "EXPECTED_DELTA_ACTIVE")):
             risk = "MEDIUM"
         else:
             risk = "LOW"
-
-        recommended = {"LOW": "STATIC_ONLY", "MEDIUM": "CURSOR_THEN_VERIFY", "HIGH": "MINIMAL_RUNTIME_PROBE"}[risk]
         return {
-            "status": "OK",
-            "source": architecture.source.to_dict(),
-            "target": target,
-            "paths": selected,
-            "risk": risk,
-            "reasons": sorted(set(reasons)),
-            "dynamic_signals": dynamic_hits,
+            "status": "OK", "source": architecture.source.to_dict(), "target": target, "paths": selected,
+            "risk": risk, "reasons": sorted(set(reasons)), "dynamic_signals": dynamic_hits,
             "boundaries": sorted(boundaries),
-            "recommended_path": recommended,
+            "recommended_path": {"LOW": "STATIC_ONLY", "MEDIUM": "CURSOR_THEN_VERIFY", "HIGH": "MINIMAL_RUNTIME_PROBE"}[risk],
             "recommended_horizon": {"LOW": 0, "MEDIUM": 1, "HIGH": 2}[risk],
         }
 
@@ -255,6 +235,8 @@ class StrawberryCore:
         filesystem: str = "TEMP_WRITE",
         network: str = "DENY",
         process_spawn: str = "DENY",
+        required_enforcement: str = "PYTHON_AUDIT",
+        provider_id: str = "local-python",
         allowed_env_names: list[str] | None = None,
         max_cases: int = 3,
         max_repeats: int = 3,
@@ -267,6 +249,8 @@ class StrawberryCore:
         executable = Path(command[0]).name.lower()
         envelope = ExecutionEnvelope(
             source_snapshot=architecture.source.snapshot_id or "",
+            provider_id=provider_id,
+            required_enforcement=required_enforcement,  # type: ignore[arg-type]
             allowed_executables=(executable,),
             filesystem=filesystem,  # type: ignore[arg-type]
             network=network,  # type: ignore[arg-type]
@@ -279,6 +263,13 @@ class StrawberryCore:
         errors = self._validate_envelope(envelope)
         if errors:
             return {"status": "INVALID", "errors": errors, "envelope": envelope.to_dict()}
+
+        provider = self.providers.get(envelope.provider_id)
+        if provider is None:
+            return {"status": "PROVIDER_NOT_FOUND", "provider_id": envelope.provider_id}
+        provider_errors = provider.validate(envelope, command)
+        if provider_errors:
+            return {"status": "PROVIDER_CAPABILITY_INSUFFICIENT", "errors": provider_errors, "provider": provider.capabilities.to_dict(), "envelope": envelope.to_dict()}
 
         expected = tuple(sorted(set(expected_runtime_edges or [])))
         forbidden = tuple(sorted(set(forbidden_runtime_edges or [])))
@@ -373,12 +364,15 @@ class StrawberryCore:
                 return {"status": "ENVELOPE_EXCEEDED", "reason": f"executable {executable!r} not allowed"}
             repeats = min(max(case.repeats, 1), plan.envelope.max_repeats)
             for attempt in range(repeats):
-                observation = observe_python(
-                    self.root,
-                    architecture.source,
-                    list(case.command),
-                    min(plan.envelope.max_runtime_seconds, 300),
-                    envelope=plan.envelope,
+                provider = self.providers.get(plan.envelope.provider_id)
+                if provider is None:
+                    return {"status": "PROVIDER_NOT_FOUND", "provider_id": plan.envelope.provider_id}
+                capability_errors = provider.validate(plan.envelope, list(case.command))
+                if capability_errors:
+                    return {"status": "PROVIDER_CAPABILITY_INSUFFICIENT", "errors": capability_errors, "provider": provider.capabilities.to_dict()}
+                observation = provider.execute(
+                    self.root, architecture.source, list(case.command),
+                    min(plan.envelope.max_runtime_seconds, 300), plan.envelope,
                 )
                 self.store.set_runtime_observation(observation)
                 self.store.set_json(
@@ -421,6 +415,8 @@ class StrawberryCore:
             errors.append("network must be DENY or ALLOW")
         if envelope.process_spawn not in {"DENY", "ALLOW"}:
             errors.append("process_spawn must be DENY or ALLOW")
+        if envelope.required_enforcement not in {"NONE", "PYTHON_AUDIT", "HOST_MANAGED", "OS_ISOLATED"}:
+            errors.append("required_enforcement is invalid")
         if not envelope.allowed_executables:
             errors.append("at least one executable must be allowed")
         if envelope.max_cases < 1 or envelope.max_repeats < 1 or envelope.max_runtime_seconds < 1:
@@ -470,6 +466,45 @@ class StrawberryCore:
             "reason": "No unresolved runtime-only branch or envelope breach was observed in the planned cases.",
         }
 
+    def evidence_history(self, limit: int = 10) -> dict[str, Any]:
+        observations = self.store.evidence_history(limit)
+        items = [obs.to_dict() for obs in observations]
+        runtime_diff: dict[str, Any] | None = None
+        if len(observations) >= 2:
+            current, previous = observations[0], observations[1]
+            current_edges = {e.key for e in current.edges}
+            previous_edges = {e.key for e in previous.edges}
+            current_effects = {(e.actor, e.kind, e.target) for e in current.effects}
+            previous_effects = {(e.actor, e.kind, e.target) for e in previous.effects}
+            runtime_diff = {
+                "from_run": previous.run_id, "to_run": current.run_id,
+                "added_edges": sorted(current_edges - previous_edges),
+                "removed_edges": sorted(previous_edges - current_edges),
+                "added_effects": sorted([list(x) for x in current_effects - previous_effects]),
+                "removed_effects": sorted([list(x) for x in previous_effects - current_effects]),
+            }
+        verifications = self.store.verification_history(limit)
+        architecture_diff: dict[str, Any] | None = None
+        if len(verifications) >= 2:
+            current, previous = verifications[0], verifications[1]
+            current_edges = set(current.get("static_edges", []))
+            previous_edges = set(previous.get("static_edges", []))
+            current_violations = set(current.get("violations", []))
+            previous_violations = set(previous.get("violations", []))
+            architecture_diff = {
+                "from_snapshot": previous.get("source_snapshot"),
+                "to_snapshot": current.get("source_snapshot"),
+                "added_static_edges": sorted(current_edges - previous_edges),
+                "removed_static_edges": sorted(previous_edges - current_edges),
+                "new_violations": sorted(current_violations - previous_violations),
+                "resolved_violations": sorted(previous_violations - current_violations),
+            }
+        return {
+            "status": "OK",
+            "runtime_observations": {"count": len(items), "latest_diff": runtime_diff, "items": items},
+            "verifications": {"count": len(verifications), "latest_architecture_diff": architecture_diff, "items": verifications},
+        }
+
     def verify(self, command: list[str] | None = None, timeout_seconds: int = 30) -> dict[str, Any]:
         architecture = self.map()
         if command:
@@ -497,7 +532,7 @@ class StrawberryCore:
         runtime_failed = runtime.get("evidence_result") == "VIOLATED_ON_TRACE"
         runtime_stale = runtime.get("status") == "STALE"
         drift_found = bool(hard or expected_result.get("status") == "FAIL" or runtime_failed)
-        return {
+        result = {
             "source": architecture.source.to_dict(),
             "build": build,
             "boundary": {"status": "FAIL" if hard else "PASS", "violations": violations},
@@ -510,6 +545,18 @@ class StrawberryCore:
                 "observed": "latest bound runtime trace when available",
             },
         }
+        self.store.append_verification({
+            "source_snapshot": architecture.source.snapshot_id,
+            "git_head": architecture.source.git_head,
+            "static_edges": sorted(e.key for e in architecture.edges),
+            "violations": sorted(v.get("edge", "") for v in violations if v.get("edge")),
+            "boundary_status": result["boundary"]["status"],
+            "expected_delta_status": expected_result.get("status"),
+            "runtime_run_id": runtime.get("execution", {}).get("run_id") if isinstance(runtime, dict) else None,
+            "runtime_evidence_result": runtime.get("evidence_result") if isinstance(runtime, dict) else None,
+            "drift": result["drift"],
+        })
+        return result
 
     def _runtime_result(
         self,
@@ -562,6 +609,8 @@ class StrawberryCore:
                 "stdout": observation.stdout,
                 "stderr": observation.stderr,
                 "isolation": observation.isolation,
+                "provider_id": observation.provider_id,
+                "enforcement": observation.enforcement,
                 "envelope_breaches": list(observation.envelope_breaches),
             },
             "observed_map": {

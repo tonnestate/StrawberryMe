@@ -38,6 +38,8 @@ def main() -> None:
     plan.add_argument("--filesystem", default="TEMP_WRITE")
     plan.add_argument("--network", default="DENY")
     plan.add_argument("--process-spawn", default="DENY")
+    plan.add_argument("--required-enforcement", default="PYTHON_AUDIT")
+    plan.add_argument("--provider", default="local-python")
     plan.add_argument("--env", action="append", default=[])
     plan.add_argument("--max-cases", type=int, default=3)
     plan.add_argument("--max-repeats", type=int, default=3)
@@ -56,6 +58,9 @@ def main() -> None:
     observe.add_argument("--forbidden-runtime-edge", action="append", default=[])
     observe.add_argument("--timeout", type=int, default=30)
     observe.add_argument("command_args", nargs=argparse.REMAINDER)
+
+    history = sub.add_parser("history")
+    history.add_argument("--limit", type=int, default=10)
 
     verify = sub.add_parser("verify")
     verify.add_argument("--run", nargs=argparse.REMAINDER)
@@ -83,6 +88,8 @@ def main() -> None:
             filesystem=args.filesystem,
             network=args.network,
             process_spawn=args.process_spawn,
+            required_enforcement=args.required_enforcement,
+            provider_id=args.provider,
             allowed_env_names=args.env,
             max_cases=args.max_cases,
             max_repeats=args.max_repeats,
@@ -92,6 +99,8 @@ def main() -> None:
         _print(core.approve_probe_plan(args.plan_id, args.by))
     if args.command == "probe-run":
         _print(core.probe_run(args.plan_id))
+    if args.command == "history":
+        _print(core.evidence_history(args.limit))
     if args.command == "observe":
         if not args.command_args:
             parser.error("observe requires a command after --")

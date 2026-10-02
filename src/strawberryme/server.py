@@ -52,6 +52,8 @@ if MCPServer is not None:
         filesystem: str = "TEMP_WRITE",
         network: str = "DENY",
         process_spawn: str = "DENY",
+        required_enforcement: str = "PYTHON_AUDIT",
+        provider_id: str = "local-python",
         allowed_env_names: list[str] | None = None,
         max_cases: int = 3,
         max_repeats: int = 3,
@@ -67,6 +69,8 @@ if MCPServer is not None:
             filesystem=filesystem,
             network=network,
             process_spawn=process_spawn,
+            required_enforcement=required_enforcement,
+            provider_id=provider_id,
             allowed_env_names=allowed_env_names,
             max_cases=max_cases,
             max_repeats=max_repeats,
@@ -85,13 +89,19 @@ if MCPServer is not None:
         expected_runtime_edges: list[str] | None = None,
         forbidden_runtime_edges: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Low-level v0.2-compatible observation API. Prefer probe_plan -> probe_run for v0.3 workflows."""
+        """Low-level compatibility observation API. Prefer probe_plan -> probe_run for adaptive workflows."""
         return _core().observe(
             command=command,
             timeout_seconds=max(1, min(timeout_seconds, 300)),
             expected_runtime_edges=expected_runtime_edges,
             forbidden_runtime_edges=forbidden_runtime_edges,
         )
+
+
+    @mcp.tool()
+    def strawberry_history(limit: int = 10) -> dict[str, Any]:
+        """Return bounded source-bound runtime evidence history and latest architecture diff between verifications."""
+        return _core().evidence_history(limit=max(1, min(limit, 100)))
 
     @mcp.tool()
     def strawberry_verify(command: list[str] | None = None, timeout_seconds: int = 30) -> dict[str, Any]:
