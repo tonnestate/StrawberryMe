@@ -38,6 +38,7 @@ def session_context(core: StrawberryCore, event_name: str = "SessionStart") -> d
     text = (
         "StrawberryMe orientation: "
         f"snapshot={status['source'].get('snapshot_id', 'unknown')}; "
+        f"conformance={status['architecture']['conformance']}; "
         f"static_violations={status['architecture']['violations']}; "
         f"future_delta={'active' if status['future_delta'] else 'none'}; "
         "use strawberry_assess/cursor before expanding context unnecessarily."

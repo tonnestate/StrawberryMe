@@ -24,7 +24,7 @@ Do not run the full workflow mechanically for every edit.
 3. `strawberry_cursor` — open only the architecture neighborhood needed for the task. Prefer adaptive mode when the required horizon is unclear.
 4. `strawberry_preflight` — record only intentional static edge additions/removals when architecture is expected to change.
 5. Implement with the normal coding harness.
-6. When runtime behavior can materially change the claim, use `strawberry_probe_plan` then `strawberry_probe_run`. Do not bypass provider capability failures.
+6. When runtime behavior can materially change the claim, use `strawberry_probe_plan`, obtain `strawberry_probe_approve` only when the plan requires approval, then use `strawberry_probe_run`. Do not bypass provider capability failures.
 7. `strawberry_verify` — check build, static boundaries, expected delta and current source-bound runtime evidence before a completion claim.
 8. Use `strawberry_history` when the question is what structurally changed across verification states or runtime observations.
 
@@ -84,6 +84,36 @@ Runtime evidence is valid only for the source snapshot and concrete execution th
 If evidence is `STALE`, `INCONCLUSIVE`, `NOT_OBSERVED`, `AMBIGUOUS`, `NOT_FOUND`, parse-incomplete or provider-insufficient, do not fill the gap with model memory.
 
 Current MAP, Observed MAP, parser cache and history are derived technical views. Repository source remains authoritative.
+
+## Conformance configuration
+
+A dependency MAP does not imply architecture conformance. Treat StrawberryMe states literally:
+
+```text
+CONFIGURED
+→ declared boundaries and rules exist; conformance may be evaluated
+
+NOT_CONFIGURED
+→ orientation only; boundary conformance is NOT_EVALUATED
+
+INCOMPLETE_CONFIG
+→ declarations are partial; boundary conformance is NOT_EVALUATED
+```
+
+Never convert an empty violation list into `ARCHITECTURE PASS` when conformance is not configured. Inferred structure may inform orientation, but it must not silently become a declared rule.
+
+## Tool responsibility
+
+Keep StrawberryMe narrow when adjacent tools are available:
+
+```text
+Graphify   → structural code graph / dependency discovery
+StrawberryMe → source-bound architecture conformance, drift and adaptive probes
+ChomView   → independent review of agent judgment / premature completion
+MangoMe    → durable contracts, work, evidence and governance
+```
+
+Do not duplicate durable organizational evidence into StrawberryMe merely because it has local SQLite. `.strawberry/` is bounded derived operational state. Prefer an external graph provider when one is available and sufficiently precise; the built-in Python AST scanner remains the zero-dependency fallback.
 
 ## Static and dynamic interpretation
 

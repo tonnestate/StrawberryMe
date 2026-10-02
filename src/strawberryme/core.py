@@ -56,7 +56,13 @@ class StrawberryCore:
             "source": architecture.source.to_dict(),
             "language_support": {"python": "ACTIVE", "javascript": "PLANNED", "php": "PLANNED", "csharp": "PLANNED"},
             "map": {"nodes": len(architecture.nodes), "edges": len(architecture.edges), "parse_errors": len(architecture.parse_errors), **architecture.scan_stats},
-            "architecture": {"rules": len(architecture.rules), "violations": len(violations)},
+            "architecture": {
+                "mode": "CONFORMANCE" if self._conformance_state(architecture) == "CONFIGURED" else "ORIENTATION_ONLY",
+                "conformance": self._conformance_state(architecture),
+                "declared_boundaries": len(self.config.boundary_patterns),
+                "rules": len(architecture.rules),
+                "violations": len(violations),
+            },
             "future_delta": delta.to_dict() if delta else None,
             "runtime": runtime_state,
             "execution_providers": self.providers.capabilities(),
@@ -114,6 +120,7 @@ class StrawberryCore:
             "expansion_basis": expansion_basis,
             "nodes": [by_id[x].to_dict() for x in sorted(seen) if x in by_id],
             "edges": [e.to_dict() for e in relevant_edges],
+            "conformance": self._conformance_state(architecture),
             "violations": [v for v in self._boundary_violations(architecture) if v["source_node"] in seen or v["target_node"] in seen],
         }
 
@@ -127,6 +134,7 @@ class StrawberryCore:
             return {
                 "status": "INVALID",
                 "source": architecture.source.to_dict(),
+                "conformance": self._conformance_state(architecture),
                 "expected_delta": delta.to_dict(),
                 "malformed_edges": malformed,
                 "architecture_violations": self._boundary_violations(architecture),
@@ -141,6 +149,7 @@ class StrawberryCore:
         return {
             "status": "VIOLATION" if any(v["severity"] == "HARD" for v in violations) else "READY",
             "source": architecture.source.to_dict(),
+            "conformance": self._conformance_state(architecture),
             "expected_delta": delta.to_dict(),
             "malformed_edges": [],
             "remove_not_present": missing_remove,
@@ -221,6 +230,7 @@ class StrawberryCore:
             risk = "LOW"
         return {
             "status": "OK", "source": architecture.source.to_dict(), "target": target, "paths": selected,
+            "conformance": self._conformance_state(architecture),
             "risk": risk, "reasons": sorted(set(reasons)), "dynamic_signals": dynamic_hits,
             "boundaries": sorted(boundaries),
             "recommended_path": {"LOW": "STATIC_ONLY", "MEDIUM": "CURSOR_THEN_VERIFY", "HIGH": "MINIMAL_RUNTIME_PROBE"}[risk],
@@ -528,19 +538,22 @@ class StrawberryCore:
             }
 
         build = self._compile_check()
+        conformance = self._conformance_state(architecture)
         violations = self._boundary_violations(architecture)
         hard = [v for v in violations if v["severity"] == "HARD"]
         runtime = self._latest_runtime_result(architecture)
         runtime_failed = runtime.get("evidence_result") == "VIOLATED_ON_TRACE"
         runtime_stale = runtime.get("status") == "STALE"
         drift_found = bool(hard or expected_result.get("status") == "FAIL" or runtime_failed)
+        boundary_status = "NOT_EVALUATED" if conformance != "CONFIGURED" else ("FAIL" if hard else "PASS")
+        drift_unknown = runtime_stale or conformance != "CONFIGURED"
         result = {
             "source": architecture.source.to_dict(),
             "build": build,
-            "boundary": {"status": "FAIL" if hard else "PASS", "violations": violations},
+            "boundary": {"status": boundary_status, "conformance": conformance, "violations": violations},
             "expected_delta": expected_result,
             "runtime": runtime,
-            "drift": "FOUND" if drift_found else ("UNKNOWN" if runtime_stale else "NONE"),
+            "drift": "FOUND" if drift_found else ("UNKNOWN" if drift_unknown else "NONE"),
             "truth_model": {
                 "declared": "architecture rules + expected delta",
                 "static": "Python AST Current MAP",
@@ -623,7 +636,12 @@ class StrawberryCore:
                 "effects": [effect.to_dict() for effect in observation.effects],
             },
             "runtime_boundary": {
-                "status": "UNKNOWN" if observation.coverage != "OBSERVED" else ("FAIL" if hard else "PASS"),
+                "status": (
+                    "NOT_EVALUATED"
+                    if self._conformance_state(architecture) != "CONFIGURED"
+                    else ("UNKNOWN" if observation.coverage != "OBSERVED" else ("FAIL" if hard else "PASS"))
+                ),
+                "conformance": self._conformance_state(architecture),
                 "violations": violations,
             },
             "assertions": {
@@ -670,6 +688,15 @@ class StrawberryCore:
         if exact:
             return exact
         return [n for n in architecture.nodes if target_l in n.id.lower() or target_l in n.qualname.lower() or target_l in n.path.lower()]
+
+    def _conformance_state(self, architecture: ArchitectureMap) -> str:
+        has_boundaries = bool(self.config.boundary_patterns)
+        has_rules = bool(architecture.rules)
+        if has_boundaries and has_rules:
+            return "CONFIGURED"
+        if has_boundaries or has_rules:
+            return "INCOMPLETE_CONFIG"
+        return "NOT_CONFIGURED"
 
     def _boundary_violations(self, architecture: ArchitectureMap) -> list[dict[str, Any]]:
         by_id = {n.id: n for n in architecture.nodes}

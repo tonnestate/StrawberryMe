@@ -503,3 +503,57 @@ def test_envelope_blocks_remove_and_rename(tmp_path: Path) -> None:
     result = core.probe_run(plan["plan"]["plan_id"])
     assert result["results"][0]["evidence_result"] == "ENVELOPE_EXCEEDED"
     assert victim.exists() and not (tmp_path / "moved.txt").exists()
+
+
+def test_no_architecture_config_is_orientation_only_not_pass(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    core = StrawberryCore(tmp_path)
+    status = core.status()
+    assert status["architecture"]["mode"] == "ORIENTATION_ONLY"
+    assert status["architecture"]["conformance"] == "NOT_CONFIGURED"
+    verified = core.verify()
+    assert verified["boundary"]["status"] == "NOT_EVALUATED"
+    assert verified["boundary"]["conformance"] == "NOT_CONFIGURED"
+    assert verified["drift"] == "UNKNOWN"
+
+
+def test_partial_architecture_config_is_not_evaluated(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "strawberry.toml").write_text(
+        '[boundaries.application]\npaths=["app/**"]\n', encoding="utf-8"
+    )
+    verified = StrawberryCore(tmp_path).verify()
+    assert verified["boundary"]["status"] == "NOT_EVALUATED"
+    assert verified["boundary"]["conformance"] == "INCOMPLETE_CONFIG"
+
+
+def test_runtime_boundary_without_declared_policy_is_not_evaluated(tmp_path: Path) -> None:
+    import sys
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/a.py").write_text("from app.b import work\n\ndef run():\n    work()\n", encoding="utf-8")
+    (tmp_path / "app/b.py").write_text("def work():\n    return None\n", encoding="utf-8")
+    edge = "module:app.a|CALL|module:app.b"
+    observed = StrawberryCore(tmp_path).observe(
+        [sys.executable, "-c", "from app.a import run; run()"],
+        expected_runtime_edges=[edge],
+    )
+    assert observed["runtime_boundary"]["status"] == "NOT_EVALUATED"
+    assert observed["runtime_boundary"]["conformance"] == "NOT_CONFIGURED"
+    assert observed["assertions"]["expected_runtime_edges"]["status"] == "PASS"
+
+
+def test_skill_compatibility_copy_is_byte_identical() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert (root / "SKILL.md").read_bytes() == (root / "skill/SKILL.md").read_bytes()
+    text = (root / "SKILL.md").read_text(encoding="utf-8")
+    assert "strawberry_probe_approve" in text
+
+
+def test_readme_documents_complete_probe_mcp_flow() -> None:
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "strawberry_probe_plan(" in readme
+    assert "strawberry_probe_approve(" in readme
+    assert "strawberry_probe_run(plan_id)" in readme

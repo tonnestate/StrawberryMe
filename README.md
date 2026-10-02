@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue">
   <img alt="Status" src="https://img.shields.io/badge/status-experimental-orange">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.0-red">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.4.1-red">
   <img alt="Python" src="https://img.shields.io/badge/python-%3E%3D3.11-3776AB">
   <img alt="MCP" src="https://img.shields.io/badge/MCP-v2-5b5bd6">
   <img alt="Agent Skill" src="https://img.shields.io/badge/agent-skill-purple">
@@ -42,9 +42,9 @@ StrawberryMe is not a coding agent, planner, deployment authority, security sand
 
 ---
 
-# v0.4.0 — Provider-aware persistent architecture evidence
+# v0.4.1 — Explicit conformance state and ecosystem boundaries
 
-v0.4 deepens the v0.3 adaptive loop instead of adding more languages or autonomous behavior.
+v0.4.1 consolidates the v0.4 evidence layer. It does not add another language or a new autonomous subsystem. The patch makes conformance state explicit, removes ambiguity with adjacent tools, and makes the two Skill locations byte-identical.
 
 ```text
 CHANGE SIGNALS
@@ -96,6 +96,42 @@ The envelope describes what a probe is allowed to require. The execution provide
 | Claude Code lifecycle adapter | SessionStart, PreCompact, PreToolUse and Stop hooks remain available as an optional harness adapter. |
 
 Multi-language support remains intentionally deferred until this Python path is empirically useful.
+
+---
+
+## v0.4.1 consolidation
+
+A static dependency MAP is useful even when a project has no declared StrawberryMe architecture policy. It is not, however, evidence that the architecture conforms to anything. v0.4.1 therefore exposes one of three conformance states:
+
+```text
+CONFIGURED
+→ declared boundaries + rules exist; boundary conformance is evaluated
+
+NOT_CONFIGURED
+→ orientation only; boundary conformance is NOT_EVALUATED
+
+INCOMPLETE_CONFIG
+→ only part of the declaration exists; boundary conformance is NOT_EVALUATED
+```
+
+Without a usable declaration, `verify()` reports `boundary.status = NOT_EVALUATED` and does not manufacture an architecture PASS from an empty violation list. Inferred structure remains derived orientation and never silently becomes a declared rule.
+
+The root `SKILL.md` is canonical. `skill/SKILL.md` is a compatibility copy and must remain byte-identical; regression tests enforce this.
+
+---
+
+## Responsibility in the TonnEstate agent stack
+
+StrawberryMe is deliberately narrower than the surrounding tools:
+
+| Layer | Responsibility |
+|---|---|
+| Graphify | Structural code graph and dependency discovery. |
+| StrawberryMe | Source-bound architecture conformance, drift and adaptive runtime probes. |
+| ChomView | Independent review of agent judgment and premature completion claims. |
+| MangoMe | Durable contracts, work, evidence, verification and governance. |
+
+When a sufficiently precise external graph provider is available, StrawberryMe should consume/reuse it rather than duplicate graph intelligence. The built-in Python AST scanner remains the zero-dependency fallback. StrawberryMe's SQLite database is bounded derived operational state, not a replacement for MangoMe's durable evidence/governance role.
 
 ---
 
@@ -338,6 +374,7 @@ strawberry_probe_plan(
     max_runtime_seconds=60,
 )
 
+strawberry_probe_approve(plan_id, approved_by="local-user")
 strawberry_probe_run(plan_id)
 strawberry_history(limit=10)
 strawberry_verify(command=None, timeout_seconds=30)
@@ -349,7 +386,7 @@ strawberry_verify(command=None, timeout_seconds=30)
 
 ## Agent Skill
 
-The canonical operating procedure is in `SKILL.md`; `skill/SKILL.md` is kept as a compatibility copy.
+The canonical operating procedure is in `SKILL.md`; `skill/SKILL.md` is a byte-identical compatibility copy. Tests fail if the two drift.
 
 The key rule is not “always run everything.” It is:
 
@@ -451,6 +488,7 @@ Deleting `.strawberry/` removes this derived state; it does not modify repositor
 ## Current limitations
 
 - Python source MAP and runtime instrumentation only.
+- Architecture conformance requires declared boundaries and rules; without them StrawberryMe operates in `ORIENTATION_ONLY` mode.
 - Runtime profiling observes executed Python paths, not all possible paths.
 - The built-in provider is not an OS sandbox.
 - Static resolution is improved but is not full type/data-flow analysis.
