@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Persistent architecture orientation and lightweight verification for software-engineering agents."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "GPL-3.0-only"
 authors = [{ name = "tonnestate" }]
 dependencies = []
 

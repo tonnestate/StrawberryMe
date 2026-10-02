@@ -4,58 +4,133 @@
   <img src="docs/strawberryme-banner.png" alt="StrawberryMe — persistent architecture orientation and lightweight verification for software-engineering agents" width="100%">
 </p>
 
-> **v0.1.0 — experimental**
+<p align="center">
+  <strong>Persistent architecture orientation for software-engineering agents.</strong><br>
+  Know where you are. Preserve boundaries. Verify what changed.
+</p>
 
-**Persistent architecture orientation and lightweight verification for software-engineering agents.**
+<p align="center">
+  <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue">
+  <img alt="Status" src="https://img.shields.io/badge/status-experimental-orange">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.0-red">
+  <img alt="Python" src="https://img.shields.io/badge/python-%3E%3D3.11-3776AB">
+  <img alt="MCP" src="https://img.shields.io/badge/MCP-v2-5b5bd6">
+  <img alt="Agent Skill" src="https://img.shields.io/badge/agent-skill-purple">
+  <img alt="Built-in LLM" src="https://img.shields.io/badge/built--in%20LLM-none-black">
+</p>
 
-StrawberryMe is a small MCP-oriented connector that keeps a coding agent anchored to the system it is changing. It focuses on four questions:
+---
 
-1. Where am I in the system?
-2. What comes in and what goes out?
-3. What depends on this area and which system boundaries apply?
-4. Did the implementation preserve the expected architecture delta?
+## What StrawberryMe is
 
-It is intentionally not a coding agent, project manager, container runtime, or replacement for the host harness sandbox.
+StrawberryMe is a **persistent architecture-orientation and verification interface for coding agents**.
 
-## v0.1 architecture
+A coding agent can usually implement code. The harder problem over long sessions is preserving a reliable mental model of the system:
 
 ```text
-AGENT / HARNESS
-      │
-      ▼
-StrawberryMe MCP v2
-      │
-      ▼
-Strawberry Core
-      ├─ Source Identity
-      ├─ Current MAP (Python AST)
-      ├─ MAP Cursor
-      ├─ I/O Boundaries
-      ├─ Architecture Rules
-      ├─ Future Delta
-      └─ Verify / Drift
-      │
-      ▼
-SQLite state (.strawberry/strawberry.db)
+Where am I?
+      ↓
+What comes in?
+      ↓
+What goes out?
+      ↓
+What depends on this area?
+      ↓
+Which system boundaries must remain intact?
+      ↓
+Did my implementation produce the structural change I intended?
 ```
 
-The MCP adapter uses the official MCP Python SDK v2 (`MCPServer`). The core has no MCP dependency and is directly testable.
+StrawberryMe externalizes that orientation so it does not depend on the model remembering the whole repository correctly.
 
-## What v0.1 does
+It is deliberately **not** another coding agent. StrawberryMe contains no planner, no built-in LLM, no autonomous task manager, no deployment authority and no requirement for a permanently running agent.
 
-- binds results to repository/source identity (Git HEAD, branch, dirty state when Git is available);
-- scans Python modules/functions/classes with the standard AST;
-- exposes function input and output annotations as lightweight I/O boundaries;
-- builds local `IMPORT` and conservative `CALL` edges;
-- assigns files to declared architecture boundaries;
-- detects forbidden cross-boundary dependencies;
-- gives the agent a bounded MAP cursor around one symbol/module;
-- records a small expected Future MAP delta (`add` / `remove` edges);
-- rescans after mutation and checks whether that delta occurred;
-- runs Python compile validation;
-- can optionally execute one local command with timeout (not a security sandbox).
+> **Agents reason. StrawberryMe keeps architectural orientation outside the context window.**
 
-## Public MCP surface
+---
+
+## What StrawberryMe v0.1.0 can do today
+
+| Capability | v0.1.0 behavior |
+|---|---|
+| Source identity | Binds observations to Git HEAD, branch and dirty state when Git is available. |
+| Current MAP | Builds a lightweight technical projection of Python modules, classes, functions and dependencies. |
+| MAP Cursor | Returns a bounded neighborhood around one module or symbol instead of dumping the repository. |
+| Input boundaries | Reads Python function parameters and annotations as lightweight inputs. |
+| Output boundaries | Reads return annotations as lightweight outputs. |
+| Dependency edges | Records local `IMPORT` edges and conservative `CALL` edges. |
+| Architecture boundaries | Maps declared paths to project-defined system boundaries. |
+| Boundary conformance | Detects forbidden cross-boundary dependencies without imposing a universal architecture style. |
+| Future Delta | Records a small expected structural change as edges to add or remove. |
+| Preflight | Checks whether the intended change conflicts with known architecture rules before completion is claimed. |
+| Drift verification | Rescans after implementation and compares expected structural delta with actual structure. |
+| Build evidence | Runs Python compile validation. |
+| Optional command evidence | Can run one explicit local command with a timeout; this is not a security sandbox. |
+| Persistent local state | Stores small map/change state in SQLite under `.strawberry/`. |
+| MCP v2 | Exposes the same deterministic core through four semantic MCP operations. |
+| Agent Skill | Includes a portable operating procedure for agents using StrawberryMe. |
+| No built-in LLM | Core results do not require model inference. |
+
+The Current MAP is intentionally a **technical projection**, not a new canonical source of truth.
+
+---
+
+## The operating model
+
+```text
+SOURCE IDENTITY
+repo + revision + dirty state
+        │
+        ▼
+CURRENT MAP
+modules + symbols + dependencies
+        │
+        ▼
+MAP CURSOR
+bounded working architecture
+        │
+   ┌────┴────┐
+   ▼         ▼
+INPUTS     OUTPUTS
+   │         │
+   └────┬────┘
+        ▼
+BOUNDARIES + DEPENDENCIES
+        │
+        ▼
+FUTURE DELTA
+what should structurally change?
+        │
+        ▼
+AGENT IMPLEMENTS
+using its normal coding tools
+        │
+        ▼
+RESCAN / VERIFY
+        │
+   ┌────┴─────────────┐
+   ▼                  ▼
+expected delta    actual structure
+   └───────┬──────────┘
+           ▼
+        DRIFT
+```
+
+The important distinction is:
+
+```text
+BUILD PASS
+is not the same as
+ARCHITECTURE PASS
+```
+
+A change may compile and still introduce an unintended or forbidden dependency.
+
+---
+
+## Public MCP v2 surface
+
+StrawberryMe deliberately exposes a small semantic interface:
 
 ```text
 strawberry_status()
@@ -64,7 +139,159 @@ strawberry_preflight(add=[], remove=[])
 strawberry_verify(command=None, timeout_seconds=30)
 ```
 
+### `strawberry_status`
+
+Establishes source identity and current MAP health.
+
+### `strawberry_cursor`
+
+Opens a bounded architecture view around the target and returns the relevant inputs, outputs, upstream/downstream relationships and known boundary violations.
+
+### `strawberry_preflight`
+
+Records only the structural delta the change is intended to produce. StrawberryMe does not require a complete Future MAP for every small change.
+
+### `strawberry_verify`
+
+Rescans the repository, validates Python compilation, checks declared architecture boundaries and compares the expected Future Delta with the resulting structure.
+
 No background agent or daemon is required.
+
+---
+
+## Agent Skill
+
+StrawberryMe ships with an Agent Skill because the MCP tools alone do not define **when** an agent should use them.
+
+The Skill is intentionally small:
+
+```text
+STATUS
+  establish source identity
+
+        ↓
+
+CURSOR
+  orient on the component
+  read INPUT / OUTPUT
+  inspect material dependencies
+
+        ↓
+
+PREFLIGHT
+  record only intentional structural changes
+
+        ↓
+
+IMPLEMENT
+  use the normal coding harness
+
+        ↓
+
+VERIFY
+  build + boundary + expected-delta check
+```
+
+The agent must treat StrawberryMe signals literally:
+
+- a passing build does **not** override an architecture violation;
+- an unresolved or ambiguous cursor must not be filled with invented architecture facts;
+- the model's remembered repository structure is not authoritative;
+- only intentional architecture changes belong in the Future Delta;
+- StrawberryMe does not decide product acceptance, deployment or governance;
+- StrawberryMe v0.1 is Python-first and intentionally conservative where static analysis is incomplete.
+
+The canonical skill is available at:
+
+```text
+SKILL.md
+```
+
+A compatibility copy is also kept at:
+
+```text
+skill/SKILL.md
+```
+
+The Skill and MCP server call the same deterministic StrawberryMe core.
+
+---
+
+## Example: architecture violation despite working code
+
+Project rule:
+
+```text
+application !→ database
+```
+
+Expected change:
+
+```text
+REMOVE
+OrderService → PricingService
+
+ADD
+OrderService → PricingPort
+PricingAdapter → PricingPort
+```
+
+The implementation compiles and tests pass, but the resulting MAP contains:
+
+```text
+OrderService → PricingPort
+OrderService → Database
+PricingAdapter → PricingPort
+```
+
+StrawberryMe can therefore report:
+
+```text
+BUILD
+PASS
+
+EXPECTED DELTA
+PARTIAL
+
+ARCHITECTURE
+FAIL
+
+UNPLANNED / FORBIDDEN EDGE
+application → database
+
+DRIFT
+FOUND
+```
+
+This is the gap StrawberryMe is designed to make visible.
+
+---
+
+## Architecture rules
+
+StrawberryMe is **not Clean-Code police**.
+
+Rules should represent real system boundaries that matter to the project, not universal style preferences.
+
+Example:
+
+```toml
+[boundaries.application]
+paths = ["app/application/**"]
+
+[boundaries.database]
+paths = ["app/db/**"]
+
+[[rules]]
+source = "application"
+target = "database"
+mode = "forbid"
+severity = "HARD"
+```
+
+The agent remains free to choose patterns, functions, classes and implementation details inside those boundaries.
+
+---
 
 ## Install
 
@@ -74,25 +301,35 @@ Python 3.11+:
 pip install -e ".[mcp]"
 ```
 
-Copy `strawberry.toml.example` to `strawberry.toml` and adapt only the boundaries that matter for your project.
+Copy the example configuration:
+
+```bash
+cp strawberry.toml.example strawberry.toml
+```
+
+Then define only the boundaries that matter for the target repository.
+
+---
 
 ## Run as MCP v2
 
-The current official Python SDK v2 uses `MCPServer`. For local development:
+For local development:
 
 ```bash
 export STRAWBERRY_ROOT=/path/to/repository
 mcp dev src/strawberryme/server.py
 ```
 
-Or run over Streamable HTTP:
+Or over Streamable HTTP:
 
 ```bash
 export STRAWBERRY_ROOT=/path/to/repository
 mcp run src/strawberryme/server.py --transport streamable-http
 ```
 
-For an MCP host that launches stdio servers, point it at the same server module using the host's MCP configuration.
+For an MCP host that launches stdio servers, point the host at the StrawberryMe server module.
+
+---
 
 ## CLI smoke test
 
@@ -113,64 +350,86 @@ Example:
 module:app.application.service|IMPORT|module:app.db.repo
 ```
 
-A planned refactor can be recorded as:
+Record an expected structural change:
 
 ```bash
 strawberry --root . preflight \
   --remove 'module:app.application.service|IMPORT|module:app.db.repo'
 ```
 
-After the implementation:
+After implementation:
 
 ```bash
 strawberry --root . verify
 ```
 
-## Architecture rules
-
-StrawberryMe is not a Clean-Code police system. Rules should express real system boundaries only.
-
-```toml
-[boundaries.application]
-paths = ["app/application/**"]
-
-[boundaries.database]
-paths = ["app/db/**"]
-
-[[rules]]
-source = "application"
-target = "database"
-mode = "forbid"
-severity = "HARD"
-```
-
-A build can therefore pass while StrawberryMe still reports an architecture violation. That distinction is intentional.
+---
 
 ## Execution and sandboxing
 
-v0.1 does **not** implement a security sandbox. `strawberry_verify(command=...)` uses a local subprocess with a timeout and labels its isolation as `NONE`.
+v0.1.0 does **not** implement its own security sandbox.
 
-The intended design is to reuse a sandbox already provided by the agent harness (Copilot/Codex/etc.) or add an execution-provider adapter later. StrawberryMe's own responsibility is source identity, orientation, architecture conformance and evidence binding—not container technology.
+`strawberry_verify(command=...)` uses a local subprocess with a timeout and reports its isolation as `NONE`.
 
-## Limits of v0.1
+The intended model is reuse-first:
+
+```text
+host harness sandbox
+Copilot / Codex / other runner
+        │
+        ▼
+StrawberryMe execution evidence
+```
+
+A future execution-provider adapter may bind to an existing sandbox. StrawberryMe's own responsibility is source identity, architecture orientation, conformance and lightweight evidence binding—not container technology.
+
+---
+
+## What StrawberryMe does not claim
+
+StrawberryMe v0.1.0 does not claim that:
+
+- static analysis reconstructs the complete runtime architecture;
+- a passing build proves correctness;
+- the Current MAP is canonical truth;
+- Python annotations fully describe API contracts;
+- all dependency injection, reflection, generated code, SQL/data dependencies or runtime-only edges are visible;
+- one architecture style is universally correct.
+
+Unknown information should remain unknown rather than being silently invented.
+
+---
+
+## Limits of v0.1.0
 
 - Python only.
 - Static `CALL` resolution is intentionally conservative.
-- Dynamic imports, dependency injection, reflection, generated code, SQL/data dependencies and runtime-only edges may be missed.
-- I/O boundaries are currently derived from Python function annotations; they are not API-schema inference.
-- Current MAP is a technical projection, not canonical truth.
-- No claim of general correctness is made from a successful build or command.
+- Dynamic imports and runtime-only dependencies may be missed.
+- I/O boundaries are currently derived from Python function annotations.
+- No background watcher or daemon.
+- No built-in security sandbox.
+- No built-in LLM.
 
-These limits are surfaced rather than hidden. JavaScript, PHP and C# should be added through parser adapters only after the Python MAP/Cursor/Drift loop proves useful.
+JavaScript, PHP and C# should be added through parser adapters only after the Python MAP/Cursor/Drift loop proves useful.
 
-## v0.1 acceptance test
+---
 
-The hypothesis is useful only if StrawberryMe can make a context-free agent safer and faster. The first evaluation should test whether a fresh agent can:
+## v0.1 acceptance hypothesis
+
+StrawberryMe is useful only if it makes a context-limited or context-reset coding agent materially better at preserving system orientation.
+
+The first evaluation should test whether a fresh agent can:
 
 - orient on a target through `strawberry_cursor`;
-- identify relevant I/O and dependencies without broad repository archaeology;
-- avoid a declared forbidden boundary;
+- identify relevant inputs, outputs and dependencies without broad repository archaeology;
+- avoid a declared forbidden system boundary;
 - implement a known Future Delta;
-- detect when the actual structure differs from the intended delta.
+- detect when actual structure differs from intended structure.
 
-If it cannot outperform ordinary search/context on these tasks, the project should not be expanded.
+If StrawberryMe does not improve those outcomes over ordinary repository search/context, the project should not be expanded.
+
+---
+
+## License
+
+StrawberryMe is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See [LICENSE](LICENSE).
