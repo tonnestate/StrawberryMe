@@ -1,0 +1,9 @@
+[boundaries.application]
+paths = ["app/application/**"]
+[boundaries.database]
+paths = ["app/db/**"]
+[[rules]]
+source = "application"
+target = "database"
+mode = "forbid"
+severity = "HARD"

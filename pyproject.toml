@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "strawberryme"
+version = "0.1.0"
+description = "Persistent architecture orientation and lightweight verification for software-engineering agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "tonnestate" }]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]
+dev = ["pytest>=8", "mcp>=2,<3"]
+
+[project.scripts]
+strawberry = "strawberryme.cli:main"
+strawberry-mcp = "strawberryme.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strawberryme"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

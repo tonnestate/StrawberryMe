@@ -1,0 +1,28 @@
+[project]
+exclude = [".git/**", ".venv/**", "venv/**", "node_modules/**", ".strawberry/**", "dist/**", "build/**", "__pycache__/**"]
+
+[boundaries.api]
+paths = ["app/api/**"]
+
+[boundaries.application]
+paths = ["app/application/**"]
+
+[boundaries.domain]
+paths = ["app/domain/**"]
+
+[boundaries.database]
+paths = ["app/db/**"]
+
+[[rules]]
+source = "domain"
+target = "database"
+mode = "forbid"
+severity = "HARD"
+description = "Domain code must not depend directly on database code."
+
+[[rules]]
+source = "application"
+target = "database"
+mode = "forbid"
+severity = "HARD"
+description = "Application code must use a port/repository boundary instead of direct DB imports."
