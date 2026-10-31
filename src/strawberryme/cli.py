@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .core import StrawberryCore
+from .reticle_donor import verify_reticle
 
 
 def _print(value: object) -> None:
@@ -65,6 +66,11 @@ def main() -> None:
     verify = sub.add_parser("verify")
     verify.add_argument("--run", nargs=argparse.REMAINDER)
 
+    reticle = sub.add_parser("reticle-verify")
+    reticle.add_argument("--url", required=True)
+    reticle.add_argument("--expect-file", required=True)
+    reticle.add_argument("--timeout", type=int, default=120)
+
     args = parser.parse_args()
     core = StrawberryCore(Path(args.root))
     if args.command == "status":
@@ -108,6 +114,15 @@ def main() -> None:
         _print(core.observe(command, args.timeout, args.expected_runtime_edge, args.forbidden_runtime_edge))
     if args.command == "verify":
         _print(core.verify(args.run or None))
+    if args.command == "reticle-verify":
+        source_snapshot = core.map().source.snapshot_id
+        receipt = verify_reticle(
+            core.root, args.url, Path(args.expect_file),
+            source_snapshot=source_snapshot, timeout_seconds=args.timeout,
+        )
+        _print(receipt)
+        if receipt["status"] != "PASS":
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
