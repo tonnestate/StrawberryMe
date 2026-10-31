@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -41,39 +42,58 @@ def verify_reticle(
     assertion = expect_file.resolve()
     if not assertion.is_relative_to(root) or not assertion.is_file():
         raise ValueError("expect-file must exist beneath the selected repository")
-    if assertion.stat().st_size > 65536:
+    # Bind the verdict to the exact validated bytes, even if the original
+    # manifest changes while the browser/Reticle daemon is running.
+    with assertion.open("rb") as stream:
+        assertion_bytes = stream.read(65537)
+    if len(assertion_bytes) > 65536:
         raise ValueError("expect-file exceeds 64 KiB")
-    with assertion.open("r", encoding="utf-8") as handle:
-        check = json.load(handle)
+    check = json.loads(assertion_bytes.decode("utf-8"))
     if not isinstance(check, dict) or not check:
         raise ValueError("expect-file must contain one JSON assertion object")
     if not 1 <= timeout_seconds <= 600:
         raise ValueError("timeout_seconds must be between 1 and 600")
 
-    # Reticle --timeout expects MILLISECONDS, and --expect-file otherwise
-    # defaults to about four seconds regardless of our subprocess deadline.
-    args = [executable, "verify", url, "--expect-file", str(assertion),
-            "--timeout", str(timeout_seconds * 1000)]
     status, reason, exit_code = "INCONCLUSIVE", "UNVERIFIED", None
     output_sha256 = None
+    # The private 0700 temp directory and 0600 file are removed on exit.
+    # Avoid --expect <json>, which could leak assertion content via argv.
+    with tempfile.TemporaryDirectory(prefix="strawberry-reticle-") as temp_dir:
+        pinned = Path(temp_dir) / "assertion.json"
+        pinned.write_bytes(assertion_bytes)
+        # Reticle --timeout expects milliseconds, unlike subprocess timeout.
+        args = [executable, "verify", url, "--expect-file", str(pinned),
+                "--timeout", str(timeout_seconds * 1000)]
+        try:
+            result = subprocess.run(
+                args, cwd=str(root), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout_seconds + 5,
+                check=False,
+            )
+            exit_code = result.returncode
+            # Upstream contract: exit 0 only for verified YES.
+            status = "PASS" if exit_code == 0 else "INCONCLUSIVE"
+            reason = "ASSERTION_VERIFIED" if status == "PASS" else "FAILED_OR_UNKNOWN"
+            output_sha256 = hashlib.sha256(
+                (result.stdout + "\n" + result.stderr).encode("utf-8")
+            ).hexdigest()
+        except FileNotFoundError:
+            reason = "RETICLE_NOT_INSTALLED"
+        except subprocess.TimeoutExpired:
+            reason = "RETICLE_TIMEOUT"
+        except OSError:
+            reason = "RETICLE_EXECUTION_ERROR"
+
+    # If the checkout changed while verification ran, do not call its now
+    # outdated assertion a current PASS. Keep the pinned hash for review.
     try:
-        result = subprocess.run(
-            args, cwd=str(root), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout_seconds + 5, check=False,
-        )
-        exit_code = result.returncode
-        # Upstream contract: exit 0 only if a requested assertion is verified YES.
-        status = "PASS" if exit_code == 0 else "INCONCLUSIVE"
-        reason = "ASSERTION_VERIFIED" if status == "PASS" else "FAILED_OR_UNKNOWN"
-        output_sha256 = hashlib.sha256(
-            (result.stdout + "\n" + result.stderr).encode("utf-8")
-        ).hexdigest()
-    except FileNotFoundError:
-        reason = "RETICLE_NOT_INSTALLED"
-    except subprocess.TimeoutExpired:
-        reason = "RETICLE_TIMEOUT"
+        with assertion.open("rb") as stream:
+            latest = stream.read(65537)
     except OSError:
-        reason = "RETICLE_EXECUTION_ERROR"
+        latest = None
+    if latest != assertion_bytes:
+        status = "INCONCLUSIVE"
+        reason = "ASSERTION_CHANGED_DURING_VERIFICATION"
 
     # No raw URL/query, report text, page content, cookies, or user data in
     # StrawberryMe's SQLite evidence history.
@@ -83,7 +103,7 @@ def verify_reticle(
         "status": status,
         "reason": reason,
         "source_snapshot": source_snapshot,
-        "assertion_sha256": hashlib.sha256(assertion.read_bytes()).hexdigest(),
+        "assertion_sha256": hashlib.sha256(assertion_bytes).hexdigest(),
         "output_sha256": output_sha256,
         "exit_code": exit_code,
         "target": f"http://{spec.hostname}:{port}",
