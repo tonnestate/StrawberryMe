@@ -33,10 +33,13 @@ def test_upstream_reticle_exit_zero_is_source_bound_verified_evidence(tmp_path, 
     assert receipt["status"] == "PASS"
     assert receipt["source_snapshot"] == "git-sha-1"
     assert receipt["output_sha256"]
-    assert commands[0][0] == [
-        "reticle", "verify", "http://127.0.0.1:8765/path",
-        "--expect-file", str(assertion.resolve()), "--timeout", "120000",
+    command = commands[0][0]
+    assert command[:4] == [
+        "reticle", "verify", "http://127.0.0.1:8765/path", "--expect-file",
     ]
+    assert Path(command[4]).name == "assertion.json"
+    assert command[-2:] == ["--timeout", "120000"]
+    assert not Path(command[4]).exists()  # private pinned copy cleaned up
     assert commands[0][1]["cwd"] == str(tmp_path)
     history = Store(tmp_path).verification_history()
     assert history[0] == receipt
@@ -105,3 +108,37 @@ def test_reticle_timeout_is_milliseconds_and_process_has_teardown_budget(tmp_pat
     assert result["status"] == "PASS"
     assert seen[0][0][-2:] == ["--timeout", "7000"]
     assert seen[0][1]["timeout"] == 12
+
+
+def test_mutated_assertion_is_never_granted_a_pass(tmp_path, monkeypatch):
+    assertion = _assertion(tmp_path)
+    original = assertion.read_bytes()
+    pinned_location = []
+    def changing_check(command, **kwargs):
+        snapshot = Path(command[4])
+        pinned_location.append(snapshot)
+        assert snapshot.read_bytes() == original
+        assertion.write_text('{"kind":"text","contains":"Changed"}', encoding="utf-8")
+        assert snapshot.read_bytes() == original
+        return SimpleNamespace(returncode=0, stdout="verified yes", stderr="")
+    monkeypatch.setattr(subprocess, "run", changing_check)
+    receipt = verify_reticle(tmp_path, "http://localhost:8765/", assertion,
+                             source_snapshot="checkout")
+    assert receipt["status"] == "INCONCLUSIVE"
+    assert receipt["reason"] == "ASSERTION_CHANGED_DURING_VERIFICATION"
+    assert receipt["assertion_sha256"] == __import__("hashlib").sha256(original).hexdigest()
+    assert not pinned_location[0].exists()
+    assert Store(tmp_path).verification_history()[0] == receipt
+
+
+def test_deleted_original_assertion_never_becomes_current_pass(tmp_path, monkeypatch):
+    assertion = _assertion(tmp_path)
+    def remove_during_verify(command, **kwargs):
+        assert Path(command[4]).is_file()
+        assertion.unlink()
+        return SimpleNamespace(returncode=0, stdout="yes", stderr="")
+    monkeypatch.setattr(subprocess, "run", remove_during_verify)
+    receipt = verify_reticle(tmp_path, "http://localhost:8765/", assertion,
+                             source_snapshot="checkout")
+    assert receipt["status"] == "INCONCLUSIVE"
+    assert receipt["reason"] == "ASSERTION_CHANGED_DURING_VERIFICATION"
