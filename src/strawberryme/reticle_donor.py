@@ -50,13 +50,16 @@ def verify_reticle(
     if not 1 <= timeout_seconds <= 600:
         raise ValueError("timeout_seconds must be between 1 and 600")
 
-    args = [executable, "verify", url, "--expect-file", str(assertion)]
+    # Reticle --timeout expects MILLISECONDS, and --expect-file otherwise
+    # defaults to about four seconds regardless of our subprocess deadline.
+    args = [executable, "verify", url, "--expect-file", str(assertion),
+            "--timeout", str(timeout_seconds * 1000)]
     status, reason, exit_code = "INCONCLUSIVE", "UNVERIFIED", None
     output_sha256 = None
     try:
         result = subprocess.run(
             args, cwd=str(root), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout_seconds, check=False,
+            encoding="utf-8", errors="replace", timeout=timeout_seconds + 5, check=False,
         )
         exit_code = result.returncode
         # Upstream contract: exit 0 only if a requested assertion is verified YES.
