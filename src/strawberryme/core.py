@@ -52,6 +52,7 @@ class StrawberryCore:
             }
         return {
             "strawberryme": __version__,
+            "external_ui": self._external_ui_evidence(architecture),
             "root": str(self.root),
             "source": architecture.source.to_dict(),
             "language_support": {"python": "ACTIVE", "javascript": "PLANNED", "php": "PLANNED", "csharp": "PLANNED"},
@@ -478,6 +479,43 @@ class StrawberryCore:
             "reason": "No unresolved runtime-only branch or envelope breach was observed in the planned cases.",
         }
 
+    def _external_ui_evidence(self, architecture: ArchitectureMap) -> dict[str, Any]:
+        """Project the most recent Reticle assertion without granting authority.
+
+        The external CLI receipt is not itself a deployment attestation.
+        Historic PASS is never presented as current after a source change.
+        """
+        for receipt in self.store.verification_history(100):
+            if not (
+                receipt.get("kind") == "EXTERNAL_RUNTIME_VERIFICATION"
+                and receipt.get("donor") == "reticlehq/reticle"
+            ):
+                continue
+            verdict = receipt.get("status")
+            verdict = verdict if verdict in {"PASS", "INCONCLUSIVE"} else "INCONCLUSIVE"
+            old_id = receipt.get("source_snapshot")
+            new_id = architecture.source.snapshot_id
+            if not architecture.source.git_head or not old_id or not new_id:
+                binding = "UNATTESTED_SOURCE"
+            else:
+                binding = "CURRENT" if old_id == new_id else "STALE"
+            return {
+                "provider": "reticlehq/reticle",
+                "assertion_verdict": verdict,
+                "source_binding": binding,
+                "assertion_sha256": receipt.get("assertion_sha256"),
+                "output_sha256": receipt.get("output_sha256"),
+                "deployment_provenance_verified": False,
+                "accepted_completion": False,
+            }
+        return {
+            "provider": "reticlehq/reticle",
+            "assertion_verdict": "NOT_CHECKED",
+            "source_binding": "NOT_CHECKED",
+            "deployment_provenance_verified": False,
+            "accepted_completion": False,
+        }
+
     def evidence_history(self, limit: int = 10) -> dict[str, Any]:
         observations = self.store.evidence_history(limit)
         items = [obs.to_dict() for obs in observations]
@@ -553,6 +591,7 @@ class StrawberryCore:
             "boundary": {"status": boundary_status, "conformance": conformance, "violations": violations},
             "expected_delta": expected_result,
             "runtime": runtime,
+            "external_ui": self._external_ui_evidence(architecture),
             "drift": "FOUND" if drift_found else ("UNKNOWN" if drift_unknown else "NONE"),
             "truth_model": {
                 "declared": "architecture rules + expected delta",
