@@ -35,7 +35,7 @@ def test_upstream_reticle_exit_zero_is_source_bound_verified_evidence(tmp_path, 
     assert receipt["output_sha256"]
     assert commands[0][0] == [
         "reticle", "verify", "http://127.0.0.1:8765/path",
-        "--expect-file", str(assertion.resolve()),
+        "--expect-file", str(assertion.resolve()), "--timeout", "120000",
     ]
     assert commands[0][1]["cwd"] == str(tmp_path)
     history = Store(tmp_path).verification_history()
@@ -91,3 +91,17 @@ def test_reject_invalid_single_assertion(tmp_path):
     assertion.write_text("[]")
     with pytest.raises(ValueError):
         verify_reticle(tmp_path, "http://localhost:8765", assertion, source_snapshot=None)
+
+
+def test_reticle_timeout_is_milliseconds_and_process_has_teardown_budget(tmp_path, monkeypatch):
+    assertion = _assertion(tmp_path)
+    seen = []
+    def fake(args, **kwargs):
+        seen.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout="yes", stderr="")
+    monkeypatch.setattr(subprocess, "run", fake)
+    result = verify_reticle(tmp_path, "http://localhost:8765/", assertion,
+                            source_snapshot="git", timeout_seconds=7)
+    assert result["status"] == "PASS"
+    assert seen[0][0][-2:] == ["--timeout", "7000"]
+    assert seen[0][1]["timeout"] == 12
